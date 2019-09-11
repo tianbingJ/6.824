@@ -93,6 +93,8 @@ func doReduce(
 			encoder.Encode(KeyValue{keyVaues[curIndex].Key, reduceValue})
 			curIndex = i
 			curValues = []string{kv.Value}
+		} else {
+			curValues = append(curValues, kv.Value)
 		}
 	}
 	reduceValue := reduceF(keyVaues[curIndex].Key, curValues)

@@ -35,29 +35,44 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	var waitGroup sync.WaitGroup
 	waitGroup.Add(ntasks)
+
+	taskChan := make(chan int, ntasks)
 	for i := 0; i < ntasks; i++ {
-		worker := <-registerChan
-		go func(i int) {
-			argu := &DoTaskArgs{
-				JobName:       jobName,
-				File:          mapFiles[i],
-				Phase:         phase,
-				TaskNumber:    i,
-				NumOtherPhase: n_other,
-			}
-			reply := struct{}{}
-			ok := call(worker, "Worker.DoTask", argu, &reply)
-			if !ok {
-				fmt.Println("call rpc failed")
-			}
-			waitGroup.Done()
-			fmt.Printf("%v %v %v done\n", jobName, phase, mapFiles[i])
-			go func() {
-				fmt.Printf("release work: %s\n", worker)
-				registerChan <- worker //release workers
-			}()
-		}(i)
+		taskChan <- i
 	}
+
+	go func() {
+		for {
+			i, ok := <-taskChan
+			if !ok {
+				break
+			}
+			worker := <-registerChan
+			go func(i int) {
+				argu := &DoTaskArgs{
+					JobName:       jobName,
+					File:          mapFiles[i],
+					Phase:         phase,
+					TaskNumber:    i,
+					NumOtherPhase: n_other,
+				}
+				reply := struct{}{}
+				ok := call(worker, "Worker.DoTask", argu, &reply)
+				//失败，任务重新入队列
+				if !ok {
+					fmt.Println("call rpc failed")
+					taskChan <- i
+					return
+				}
+				waitGroup.Done()
+				fmt.Printf("%v %v %v done\n", jobName, phase, mapFiles[i])
+				go func() {
+					fmt.Printf("release work: %s\n", worker)
+					registerChan <- worker //release workers
+				}()
+			}(i)
+		}
+	}()
 	waitGroup.Wait()
 	fmt.Printf("Schedule: %v done\n", phase)
 }

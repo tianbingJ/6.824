@@ -57,12 +57,18 @@ type Raft struct {
 
 }
 
+/*
+ */
+type AppendEntries struct {
+}
+
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
+
 	// Your code here (2A).
 	return term, isleader
 }
@@ -108,8 +114,6 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -126,11 +130,12 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 }
 
-//
-// example RequestVote RPC handler.
-//
+/*
+Raft启动一个goroutine，当持续一段时间没有收到心跳RPC时，发起投票
+*/
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
 }
 
 //

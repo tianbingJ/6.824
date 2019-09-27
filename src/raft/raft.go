@@ -17,13 +17,19 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 import "labrpc"
 
 // import "bytes"
 // import "labgob"
 
 
+const (
+	RaftElectionTimeout = 300 * time.Millisecond
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -55,13 +61,42 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	//persistent state
+	currentTerm int
+	votedFor int
+	lastHeartBeat time.Time
+
+	//volatile state
+	commitIndex int
+	lastApplied int
+
+	//volatile state on leaders
+	nextIndex []int
+	matchIndex []int
+}
+
+/*
+entry log
+ */
+type Entry struct {
+
 }
 
 /*
  */
-type AppendEntries struct {
+type AppendEntriesArgs struct {
+	Term int      //当前任期
+	leaderId int  //leader在peer中的位置
+	PrevLogIndex int
+	PrevLogTerm int
+	entries []Entry
+	leaderCommit int
 }
 
+type AppendEntriesReply struct {
+	term int
+	success bool
+}
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -119,7 +154,10 @@ func (rf *Raft) readPersist(data []byte) {
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
+	term int
+	candidateId int
+	lastLogIndex int
+	lastLogTerm int
 }
 
 //
@@ -127,7 +165,8 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
-	// Your data here (2A).
+	term int
+	voteGranted bool
 }
 
 /*
@@ -208,6 +247,14 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+/*
+选举处理逻辑：
+1.当超过一段时间没有收到心跳包时，当前Raft节点发起选举
+ */
+func (rf * Raft) handleElection() {
+
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -219,6 +266,10 @@ func (rf *Raft) Kill() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
+
+
+/*
+ */
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -226,11 +277,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+
 	// Your initialization code here (2A, 2B, 2C).
+	go rf.handleElection()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }

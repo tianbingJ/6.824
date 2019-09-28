@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 import "labrpc"
@@ -26,10 +28,21 @@ import "labrpc"
 // import "bytes"
 // import "labgob"
 
+type Role int
 
 const (
-	RaftElectionTimeout = 300 * time.Millisecond
+	Follower = 0
+	Candidate
+	Leader
 )
+
+const (
+	ElectionTimeoutMin = 150 * time.Millisecond
+	ElectionTimeoutMax = 300 * time.Millisecond
+)
+
+const NonVotes = -1
+
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -60,10 +73,11 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	role Role //角色
 
 	//persistent state
-	currentTerm int
-	votedFor int
+	currentTerm   int
+	votedFor      int
 	lastHeartBeat time.Time
 
 	//volatile state
@@ -71,30 +85,29 @@ type Raft struct {
 	lastApplied int
 
 	//volatile state on leaders
-	nextIndex []int
+	nextIndex  []int
 	matchIndex []int
 }
 
 /*
 entry log
- */
+*/
 type Entry struct {
-
 }
 
 /*
  */
 type AppendEntriesArgs struct {
-	Term int      //当前任期
-	leaderId int  //leader在peer中的位置
+	Term         int //当前任期
+	leaderId     int //leader在peer中的位置
 	PrevLogIndex int
-	PrevLogTerm int
-	entries []Entry
+	PrevLogTerm  int
+	entries      []Entry
 	leaderCommit int
 }
 
 type AppendEntriesReply struct {
-	term int
+	term    int
 	success bool
 }
 
@@ -107,7 +120,6 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	return term, isleader
 }
-
 
 //
 // save Raft's persistent state to stable storage,
@@ -124,7 +136,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -148,16 +159,15 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	term int
-	candidateId int
+	term         int
+	candidateId  int
 	lastLogIndex int
-	lastLogTerm int
+	lastLogTerm  int
 }
 
 //
@@ -165,16 +175,41 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
-	term int
+	term        int
 	voteGranted bool
 }
 
 /*
-Raft启动一个goroutine，当持续一段时间没有收到心跳RPC时，发起投票
+
 */
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply := &RequestVoteReply{
+		term:rf.currentTerm,
+	}
+	granted := false
+	if args.term < rf.currentTerm {
+		return
+	}
+	if rf.votedFor == NonVotes || rf.votedFor == args.candidateId {
+		if args.term > rf.currentTerm && args.
+	}
+}
 
+/**
+心跳检测和接受日志
+TODO 实现
+ */
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.term = rf.currentTerm
+	if reply.term < rf.currentTerm {
+		reply.success = false
+		return
+	}
 }
 
 //
@@ -233,7 +268,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
-
 	return index, term, isLeader
 }
 
@@ -249,10 +283,67 @@ func (rf *Raft) Kill() {
 
 /*
 选举处理逻辑：
-1.当超过一段时间没有收到心跳包时，当前Raft节点发起选举
- */
-func (rf * Raft) handleElection() {
+当Follower超过一段时间没有收到心跳包时，当前Raft节点发起选举
+*/
+func (rf *Raft) checkHeartBeat() {
+	interval := int64(ElectionTimeoutMax - ElectionTimeoutMin)
+	elecTime := time.Duration(rand.Int63n(interval)) + ElectionTimeoutMin
+	ch := time.NewTimer(elecTime).C
+	_ = <-ch
+	d := time.Since(rf.lastHeartBeat)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.role == Follower && d < elecTime {
+		newTerm := rf.currentTerm + 1
+		rf.role = Candidate
+		rf.votedFor = rf.me
+		//开始选举
+		go rf.startElection(newTerm)
+	}
+	//开始新的心跳检测
+	go rf.checkHeartBeat()
+}
 
+/**
+开始选举
+ */
+func (rf *Raft) startElection(newTerm int) {
+	var votes int32 = 1
+	var waitGroup sync.WaitGroup
+	n := len(rf.peers)
+	waitGroup.Add(n - 1)
+	for i := 0; i < len(rf.peers); i ++ {
+		if i != rf.me {
+			go func(i int) {
+				args := RequestVoteArgs{
+					term:newTerm,
+					candidateId:rf.me,
+					lastLogIndex:0,
+					lastLogTerm:rf.currentTerm,
+				}
+				reply := RequestVoteReply{}
+				ok := rf.sendRequestVote(i, &args, &reply)
+				if ok {
+					atomic.AddInt32(&votes, 1)
+				}
+				waitGroup.Done()
+			}(i)
+		}
+	}
+	waitGroup.Wait()
+	//成为leader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.role != Candidate {
+		return
+	}
+	if votes <= int32(n / 2) {
+		rf.role= Follower
+	} else {
+		rf.role = Leader
+		rf.currentTerm = newTerm
+	}
+	rf.votedFor = NonVotes
 }
 
 //
@@ -267,7 +358,6 @@ func (rf * Raft) handleElection() {
 // for any long-running work.
 //
 
-
 /*
  */
 func Make(peers []*labrpc.ClientEnd, me int,
@@ -277,9 +367,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-
 	// Your initialization code here (2A, 2B, 2C).
-	go rf.handleElection()
+	rf.role = Follower
+	go rf.checkHeartBeat()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -128,10 +128,13 @@ type AppendEntriesReply struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	var term int
-	var isleader bool
-
+	var isLeader bool
 	// Your code here (2A).
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isLeader = rf.state == Leader
+	return term, isLeader
 }
 
 //
@@ -202,11 +205,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply = &RequestVoteReply{}
 	granted := false
 
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		DPrintf("vote reply from node: %v, for node: %v, args:%v   reply:%v\n", rf.me, args.CandidateId, args, reply)
-		return
-	}
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		if rf.state != Follower {
@@ -214,7 +212,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 	//TODO 需要判断log是不是最新的
-	if rf.votedFor == NonVotes || rf.votedFor == args.CandidateId {
+	if args.Term == rf.currentTerm && (rf.votedFor == NonVotes || rf.votedFor == args.CandidateId) {
 		rf.votedFor = args.CandidateId
 		granted = true
 		rf.updateHeartBeat() //重置选举时间
@@ -282,7 +280,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	x := rand.Intn(10000)
+	DPrintf("before call: %v , %v, %v", x, time.Now(), args)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	DPrintf("after call: %v , %v, %v", x, time.Now(), reply)
 	return ok
 }
 
@@ -324,13 +325,13 @@ func (rf *Raft) Kill() {
 当Follower超过一段时间没有收到心跳包时，当前Raft节点发起选举
 */
 func (rf *Raft) checkElecTimeout() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	elecTime := rf.randomElecTime()
 	rf.resetElecTimer(elecTime)
 	ch := rf.elecTimer.C
 	_ = <-ch
 	d := time.Since(rf.lastHeartBeat)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if rf.state == Leader {
 		return
 	}
@@ -347,7 +348,7 @@ func (rf *Raft) checkElecTimeout() {
 }
 
 func (rf *Raft) resetElecTimer(duration time.Duration) {
-	rf.elecTimer.Reset(duration)
+	rf.elecTimer = time.NewTimer(duration)
 }
 
 /**
@@ -389,8 +390,8 @@ func (rf *Raft) startElection(newTerm int) {
 			args := RequestVoteArgs{
 				Term:         newTerm,
 				CandidateId:  rf.me,
-				LastLogIndex: 0,
-				LastLogTerm:  rf.currentTerm, //log对应的term
+				LastLogIndex: 0,   //log对应的index TODO
+				LastLogTerm:  rf.currentTerm, //log对应的term TODO
 			}
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(i, &args, &reply)
@@ -403,7 +404,7 @@ func (rf *Raft) startElection(newTerm int) {
 				}
 			}
 			waitGroup.Done()
-			DPrintf("rpc result, node: %d election, Term %v: response from node %d, %v", rf.me, newTerm, i, reply)
+			DPrintf("OK:%v rpc result, node: %d election, Term %v: response from node %d, %v", ok, rf.me, newTerm, i, reply)
 		}(i)
 	}
 	waitGroup.Wait()
@@ -411,10 +412,7 @@ func (rf *Raft) startElection(newTerm int) {
 	//成为leader
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.state != Candidate {
-		return
-	}
-	if rf.currentTerm != newTerm {
+	if rf.state != Candidate || rf.currentTerm != newTerm {
 		return
 	}
 	if votes > int32(n/2) {

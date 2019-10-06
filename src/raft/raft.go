@@ -28,12 +28,25 @@ import "labrpc"
 // import "bytes"
 // import "labgob"
 
-type Role int
+type State int
+
+func (s State) String() string{
+	switch s {
+	case Follower:
+		return "Follower";
+	case Candidate:
+		return "Candidate"
+	case Leader:
+		return "Leader"
+	default:
+		return "Unknown State"
+	}
+}
 
 const (
-	Follower  = 1
-	Candidate = 2
-	Leader    = 3
+	Follower   State = iota
+	Candidate
+	Leader
 )
 
 const (
@@ -72,7 +85,7 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state         Role //角色
+	state         State
 	elecTimer     *time.Timer
 	lastHeartBeat time.Time
 
@@ -187,10 +200,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	reply = &RequestVoteReply{}
+	granted := false
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
 		DPrintf("vote reply from node: %v, for node: %v, args:%v   reply:%v\n", rf.me, args.CandidateId, args, reply)
 		return
 	}
@@ -203,10 +216,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//TODO 需要判断log是不是最新的
 	if rf.votedFor == NonVotes || rf.votedFor == args.CandidateId {
 		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
+		granted = true
 		rf.updateHeartBeat() //重置选举时间
 	}
 	reply.Term = rf.currentTerm
+	reply.VoteGranted = granted
 	DPrintf("vote reply from node: %v,for node:%v,  args:%v   reply:%v\n", rf.me, args.CandidateId, args, reply)
 }
 
@@ -368,28 +382,29 @@ func (rf *Raft) startElection(newTerm int) {
 	n := len(rf.peers)
 	waitGroup.Add(n - 1)
 	for i := 0; i < len(rf.peers); i++ {
-		if i != rf.me {
-			go func(i int) {
-				args := RequestVoteArgs{
-					Term:         newTerm,
-					CandidateId:  rf.me,
-					LastLogIndex: 0,
-					LastLogTerm:  rf.currentTerm,
-				}
-				reply := RequestVoteReply{}
-				ok := rf.sendRequestVote(i, &args, &reply)
-				if ok {
-					if reply.VoteGranted {
-						atomic.AddInt32(&votes, 1)
-					}
-					if reply.Term > rf.currentTerm {
-						rf.switchToFollower(reply.Term)
-					}
-				}
-				waitGroup.Done()
-				DPrintf("rpc result, node: %d election, Term %v: response from node %d, %v", rf.me, newTerm, i, reply)
-			}(i)
+		if i == rf.me {
+			continue
 		}
+		go func(i int) {
+			args := RequestVoteArgs{
+				Term:         newTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: 0,
+				LastLogTerm:  rf.currentTerm, //log对应的term
+			}
+			var reply RequestVoteReply
+			ok := rf.sendRequestVote(i, &args, &reply)
+			if ok {
+				if reply.VoteGranted {
+					atomic.AddInt32(&votes, 1)
+				}
+				if reply.Term > rf.currentTerm {
+					rf.switchToFollower(reply.Term)
+				}
+			}
+			waitGroup.Done()
+			DPrintf("rpc result, node: %d election, Term %v: response from node %d, %v", rf.me, newTerm, i, reply)
+		}(i)
 	}
 	waitGroup.Wait()
 	DPrintf("total result: node %d election, Term %v: votes:%v", rf.me, newTerm, votes)

@@ -73,12 +73,13 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	role Role //角色
+	state Role //角色
+	elecTimer time.Timer
+	lastHeartBeat time.Time
 
 	//persistent state
 	currentTerm   int
 	votedFor      int
-	lastHeartBeat time.Time
 
 	//volatile state
 	commitIndex int
@@ -286,22 +287,38 @@ func (rf *Raft) Kill() {
 当Follower超过一段时间没有收到心跳包时，当前Raft节点发起选举
 */
 func (rf *Raft) checkHeartBeat() {
-	interval := int64(ElectionTimeoutMax - ElectionTimeoutMin)
-	elecTime := time.Duration(rand.Int63n(interval)) + ElectionTimeoutMin
-	ch := time.NewTimer(elecTime).C
+	elecDuration := rf.resetElecTimer()
+	ch := rf.elecTimer.C
 	_ = <-ch
 	d := time.Since(rf.lastHeartBeat)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.role == Follower && d < elecTime {
+	if rf.state == Follower && d < elecDuration {
 		newTerm := rf.currentTerm + 1
-		rf.role = Candidate
+		rf.state = Candidate
 		rf.votedFor = rf.me
 		//开始选举
 		go rf.startElection(newTerm)
 	}
 	//开始新的心跳检测
 	go rf.checkHeartBeat()
+}
+
+/**
+重置选举超时时间
+ */
+func (rf *Raft) resetElecTimer() time.Duration {
+	interval := int64(ElectionTimeoutMax - ElectionTimeoutMin)
+	elecTime := time.Duration(rand.Int63n(interval)) + ElectionTimeoutMin
+	rf.elecTimer.Reset(elecTime)
+	return elecTime
+}
+
+/**
+停止选举超时检测
+ */
+func (rf *Raft) stopElecTimer() {
+	rf.elecTimer.Stop()
 }
 
 /**
@@ -334,13 +351,13 @@ func (rf *Raft) startElection(newTerm int) {
 	//成为leader
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.role != Candidate {
+	if rf.state != Candidate {
 		return
 	}
 	if votes <= int32(n / 2) {
-		rf.role= Follower
+		rf.state = Follower
 	} else {
-		rf.role = Leader
+		rf.state = Leader
 		rf.currentTerm = newTerm
 	}
 	rf.votedFor = NonVotes
@@ -368,7 +385,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.role = Follower
+	rf.state = Follower
 	go rf.checkHeartBeat()
 
 	// initialize from state persisted before a crash

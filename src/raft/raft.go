@@ -393,7 +393,10 @@ func (rf *Raft) checkElecTimeout() {
 	ch := rf.elecTimer.C
 	rf.mu.Unlock()
 	//wait to time out
-	_ = <-ch
+	_, ok := <-ch
+	if !ok {
+		return
+	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	d := time.Since(rf.lastHeartBeat)
@@ -441,7 +444,7 @@ func (rf *Raft) stopElecTimer() {
 
 /**
 开始选举
-选举方法只需要等待足够数量的node返回选举结果即可，没法等待所有节点都返回之后再统计。
+选举方法只需要等待足够数量的node返回选举结果即可，不能等待所有RPC请求都返回之后再统计,部分请求超时会影响选举。
 */
 func (rf *Raft) startElection(electTerm int) {
 	var votes int32 = 1

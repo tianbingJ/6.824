@@ -31,7 +31,7 @@ import "labrpc"
 
 type State int
 
-func (s State) String() string{
+func (s State) String() string {
 	switch s {
 	case Follower:
 		return "Follower";
@@ -45,7 +45,7 @@ func (s State) String() string{
 }
 
 const (
-	Follower   State = iota
+	Follower State = iota
 	Candidate
 	Leader
 )
@@ -53,6 +53,7 @@ const (
 const (
 	ElectionTimeoutMin = 150 * time.Millisecond
 	ElectionTimeoutMax = 300 * time.Millisecond
+	HeartBeatInterval  = 100 * time.Millisecond
 )
 
 const NonVotes = -1
@@ -188,7 +189,7 @@ type RequestVoteArgs struct {
 }
 
 func (args RequestVoteArgs) String() string {
-	return fmt.Sprintf("Term:%d, CandidaetId:%d, LastLogIndex:%d, LastLogTerm:%d",args.Term, args.CandidateId, args.LastLogIndex, args.LastLogTerm)
+	return fmt.Sprintf("Term:%d, CandidaetId:%d, LastLogIndex:%d, LastLogTerm:%d", args.Term, args.CandidateId, args.LastLogIndex, args.LastLogTerm)
 }
 
 //
@@ -200,24 +201,29 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-func (reply RequestVoteReply)String() string {
+func (reply RequestVoteReply) String() string {
 	return fmt.Sprintf("Term: %d, VoteGranted:%v", reply.Term, reply.VoteGranted)
 }
 
 /*
  */
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	start := time.Now()
 	//// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	granted := false
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+	curTerm := rf.currentTerm
 
+	granted := false
 	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		if rf.state != Follower {
-			rf.switchToFollower(args.Term)
-		}
+		rf.updateTerm(args.Term)
+		rf.switchToFollower()
 	}
 	//TODO 需要判断log是不是最新的
 	if args.Term == rf.currentTerm && (rf.votedFor == NonVotes || rf.votedFor == args.CandidateId) {
@@ -227,35 +233,71 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = granted
-	DPrintf("vote reply from node: %v,for node:%v,  args:%v   reply:%v\n", rf.me, args.CandidateId, args, reply)
+	DPrintf("node:%v vote for node:%v oldTerm:%v Term:%v Granted:%v VotedFor:%v\n", rf.me, args.CandidateId, curTerm, args.Term, reply.VoteGranted, rf.votedFor)
+	end := time.Now()
+	if end.Sub(start) > time.Millisecond*1000 {
+		DPrintf("Request cost too much")
+	}
+}
+
+/**
+更新更高的term
+*/
+func (rf *Raft) updateTerm(term int) {
+	rf.currentTerm = term
+	rf.votedFor = NonVotes
 }
 
 /**
 当收到比自己大的term时，转为Follower,开始心跳检测
 在个方法需要在临界区内调用。
 */
-func (rf *Raft) switchToFollower(term int) {
+func (rf *Raft) switchToFollower() {
 	if rf.state == Follower {
 		return
 	}
+	DPrintf("node: %v switch to Follower from %v", rf.me, rf.state)
+	if rf.state == Leader {
+		go rf.checkElecTimeout()
+	}
 	rf.state = Follower
-	rf.currentTerm = term
-	rf.votedFor = NonVotes
-	go rf.checkElecTimeout()
+}
+
+func (rf *Raft) switchToLeader() {
+	if rf.state == Leader {
+		return
+	}
+	DPrintf("node: %v switch to Leader from %v", rf.me, rf.state)
+	rf.state = Leader
+	go rf.fireHeartBeats()
 }
 
 /**
 心跳检测和接受日志
 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	start := time.Now()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
-	if reply.Term < rf.currentTerm {
+	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
 	}
+
+	if rf.state != Follower {
+		rf.updateTerm(args.Term)
+		rf.switchToFollower()
+	}
+
+	reply.Term = rf.currentTerm
+	reply.Success = true
 	rf.updateHeartBeat() //合法请求，重置心跳时间
+	end := time.Now()
+	if end.Sub(start) > time.Millisecond*1000 {
+		DPrintf("Request cost too much")
+	}
+	//DPrintf("")
 }
 
 //
@@ -288,15 +330,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	//x := rand.Intn(10000)
-	//DPrintf("before call: %v , %v, %v", x, time.Now(), args)
+	//tS := time.Now()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	//DPrintf("after call: %v , %v, args:%v \treply:%v  isOk:%v", x, time.Now(), args, reply, ok)
+	//tE := time.Now()
+	//if tE.Sub(tS) > time.Millisecond*5 {
+	//	DPrintf("Warning!!! call RequestVote cost %v", tE.Sub(tS))
+	//}
 	return ok
 }
 
-func (rf*Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply * AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	//tS := time.Now()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	//tE := time.Now()
+	//if tE.Sub(tS) > time.Millisecond*5 {
+	//	DPrintf("Warning!!! node:%v call AppendEntries to node:%v  cost %v ", args.LeaderId, server, tE.Sub(tS))
+	//}
 	return ok
 }
 
@@ -339,9 +388,8 @@ func (rf *Raft) Kill() {
 */
 func (rf *Raft) checkElecTimeout() {
 	rf.mu.Lock()
-	elecTime := rf.randomElecTime()
-	DPrintf("node :%v electime :%v %v\n", rf.me, elecTime, rf.state)
-	rf.resetElecTimer(elecTime)
+	electTimeOut := rf.randomElecTime()
+	rf.resetElecTimer(electTimeOut)
 	ch := rf.elecTimer.C
 	rf.mu.Unlock()
 	//wait to time out
@@ -353,12 +401,13 @@ func (rf *Raft) checkElecTimeout() {
 		return
 	}
 
-	if d > elecTime {
+	if d > electTimeOut {
 		rf.currentTerm = rf.currentTerm + 1
 		rf.state = Candidate
 		rf.votedFor = rf.me
 		//开始选举
 		go rf.startElection(rf.currentTerm)
+		DPrintf("node:%d start election, Term %v:  time:%v", rf.me, rf.currentTerm, electTimeOut)
 	}
 	//开始新的心跳检测
 	go rf.checkElecTimeout()
@@ -387,32 +436,32 @@ func (rf *Raft) randomElecTime() time.Duration {
 停止选举超时检测
 */
 func (rf *Raft) stopElecTimer() {
-	rf.elecTimer.Stop()
+	rf.elecTimer = nil
 }
 
 /**
 开始选举
-这个方法可以优化，没有必要等待所有的投票全部返回即可统计结果。
+选举方法只需要等待足够数量的node返回选举结果即可，没法等待所有节点都返回之后再统计。
 */
-func (rf *Raft) startElection(newTerm int) {
-	DPrintf("node:%d start election, Term %v:  time:%v", rf.me, newTerm, time.Now())
+func (rf *Raft) startElection(electTerm int) {
 	var votes int32 = 1
 	var waitGroup sync.WaitGroup
 	n := len(rf.peers)
 	waitGroup.Add(n - 1)
-	for i := 0; i < len(rf.peers); i++ {
+	for i := 0; i < n; i++ {
 		if i == rf.me {
 			continue
 		}
 		go func(i int) {
 			args := RequestVoteArgs{
-				Term:         newTerm,
+				Term:         electTerm,
 				CandidateId:  rf.me,
-				LastLogIndex: 0,   //log对应的index TODO
+				LastLogIndex: 0, //log对应的index TODO
 				LastLogTerm:  0, //log对应的term TODO
 			}
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(i, &args, &reply)
+			waitGroup.Done()
 			if ok {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
@@ -420,37 +469,65 @@ func (rf *Raft) startElection(newTerm int) {
 					atomic.AddInt32(&votes, 1)
 				}
 				if reply.Term > rf.currentTerm {
-					rf.switchToFollower(reply.Term)
+					DPrintf("electFailed:request Term %v, reply.Term: %v\n", args.Term,reply.Term)
+					rf.updateTerm(reply.Term)
+					rf.switchToFollower()
+					return
+				}
+				if rf.state != Candidate || rf.currentTerm != electTerm {
+					if rf.state != Leader {
+						DPrintf("elect failed: state or term changed, state:%v, term:%v, elect term:%v", rf.state, rf.currentTerm, electTerm)
+					}
+					return
+				}
+				if votes > int32(n/2) {
+					rf.switchToLeader()
 				}
 			}
-			waitGroup.Done()
-			DPrintf("OK:%v rpc result, node: %d election, Term %v: response from node %d, %v", ok, rf.me, newTerm, i, reply)
 		}(i)
 	}
 	waitGroup.Wait()
-	DPrintf("total result: node %d election, Term %v: votes:%v", rf.me, newTerm, votes)
-	//成为leader
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.state != Candidate || rf.currentTerm != newTerm {
-		return
-	}
-	if votes > int32(n/2) {
-		rf.switchToLeader()
-	}
-}
-
-func (rf *Raft) switchToLeader() {
-	rf.state = Leader
-	rf.stopElecTimer()
 }
 
 /*
 leader发出心跳包
-TODO 实现
- */
-func (rf *Raft) heartBeat() {
+*/
+func (rf *Raft) fireHeartBeats() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//no leader anymore, stop fire heart beats
+	if rf.state != Leader {
+		return
+	}
+	//DPrintf("node %v fire heart Beats state:%v   term:%v", rf.me, rf.state, rf.currentTerm)
+	args := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: 0, //TODkO
+		PrevLogTerm:  rf.currentTerm,
+		Entries:      nil,
+		LeaderCommit: 0,
+	}
+	for i := 0; i < len(rf.peers); i++ {
+		go func(serv int) {
+			if serv != rf.me {
+				reply := AppendEntriesReply{
+				}
+				rf.sendAppendEntries(serv, &args, &reply)
+				if !reply.Success {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if reply.Term > rf.currentTerm {
+						rf.updateTerm(reply.Term)
+						rf.switchToFollower()
+					}
+				}
+			}
 
+		}(i)
+	}
+	<-time.After(HeartBeatInterval)
+	go rf.fireHeartBeats()
 }
 
 //
@@ -475,14 +552,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.currentTerm = 0
+	rf.readPersist(persister.ReadRaftState())
+	rf.switchToFollower()
 	rf.state = Follower
 	rf.lastHeartBeat = time.Now()
 	rf.votedFor = NonVotes
-	rf.elecTimer = time.NewTimer(rf.randomElecTime())
 	go rf.checkElecTimeout()
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	return rf
 }

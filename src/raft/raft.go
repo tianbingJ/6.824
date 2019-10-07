@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -186,6 +187,10 @@ type RequestVoteArgs struct {
 	LastLogTerm  int
 }
 
+func (args RequestVoteArgs) String() string {
+	return fmt.Sprintf("Term:%d, CandidaetId:%d, LastLogIndex:%d, LastLogTerm:%d",args.Term, args.CandidateId, args.LastLogIndex, args.LastLogTerm)
+}
+
 //
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
@@ -195,14 +200,17 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+func (reply RequestVoteReply)String() string {
+	return fmt.Sprintf("Term: %d, VoteGranted:%v", reply.Term, reply.VoteGranted)
+}
+
 /*
  */
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	//// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	reply = &RequestVoteReply{}
 	granted := false
 
 	if args.Term > rf.currentTerm {
@@ -224,7 +232,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 /**
 当收到比自己大的term时，转为Follower,开始心跳检测
-原子性由调用该方法的地方实现。
+在个方法需要在临界区内调用。
 */
 func (rf *Raft) switchToFollower(term int) {
 	if rf.state == Follower {
@@ -233,7 +241,7 @@ func (rf *Raft) switchToFollower(term int) {
 	rf.state = Follower
 	rf.currentTerm = term
 	rf.votedFor = NonVotes
-	rf.checkElecTimeout()
+	go rf.checkElecTimeout()
 }
 
 /**
@@ -280,10 +288,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	x := rand.Intn(10000)
-	DPrintf("before call: %v , %v, %v", x, time.Now(), args)
+	//x := rand.Intn(10000)
+	//DPrintf("before call: %v , %v, %v", x, time.Now(), args)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	DPrintf("after call: %v , %v, %v", x, time.Now(), reply)
+	//DPrintf("after call: %v , %v, args:%v \treply:%v  isOk:%v", x, time.Now(), args, reply, ok)
+	return ok
+}
+
+func (rf*Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply * AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -326,17 +339,21 @@ func (rf *Raft) Kill() {
 */
 func (rf *Raft) checkElecTimeout() {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	elecTime := rf.randomElecTime()
+	DPrintf("node :%v electime :%v %v\n", rf.me, elecTime, rf.state)
 	rf.resetElecTimer(elecTime)
 	ch := rf.elecTimer.C
+	rf.mu.Unlock()
+	//wait to time out
 	_ = <-ch
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	d := time.Since(rf.lastHeartBeat)
 	if rf.state == Leader {
 		return
 	}
 
-	if rf.state == Follower && d > elecTime {
+	if d > elecTime {
 		rf.currentTerm = rf.currentTerm + 1
 		rf.state = Candidate
 		rf.votedFor = rf.me
@@ -353,6 +370,7 @@ func (rf *Raft) resetElecTimer(duration time.Duration) {
 
 /**
 当收到合法RPC时，Follower需要更新心跳时间和选举超时时间
+TODO 考虑timer的使用。
 */
 func (rf *Raft) updateHeartBeat() {
 	rf.lastHeartBeat = time.Now()
@@ -377,7 +395,7 @@ func (rf *Raft) stopElecTimer() {
 这个方法可以优化，没有必要等待所有的投票全部返回即可统计结果。
 */
 func (rf *Raft) startElection(newTerm int) {
-	DPrintf("node:%d start election, Term %v: ", rf.me, newTerm)
+	DPrintf("node:%d start election, Term %v:  time:%v", rf.me, newTerm, time.Now())
 	var votes int32 = 1
 	var waitGroup sync.WaitGroup
 	n := len(rf.peers)
@@ -391,11 +409,13 @@ func (rf *Raft) startElection(newTerm int) {
 				Term:         newTerm,
 				CandidateId:  rf.me,
 				LastLogIndex: 0,   //log对应的index TODO
-				LastLogTerm:  rf.currentTerm, //log对应的term TODO
+				LastLogTerm:  0, //log对应的term TODO
 			}
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(i, &args, &reply)
 			if ok {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				if reply.VoteGranted {
 					atomic.AddInt32(&votes, 1)
 				}
@@ -457,6 +477,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.state = Follower
+	rf.lastHeartBeat = time.Now()
 	rf.votedFor = NonVotes
 	rf.elecTimer = time.NewTimer(rf.randomElecTime())
 	go rf.checkElecTimeout()

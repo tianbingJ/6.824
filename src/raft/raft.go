@@ -50,6 +50,8 @@ const (
 	Leader
 )
 
+const CommitBuffer = 1000000
+
 const (
 	ElectionTimeoutMin = 150 * time.Millisecond
 	ElectionTimeoutMax = 300 * time.Millisecond
@@ -79,7 +81,8 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.Mutex // Lock to protect shared access to this peer's state
+	syncCond  *sync.Cond
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -97,17 +100,21 @@ type Raft struct {
 
 	//volatile state
 	commitIndex int
+	commitC chan struct{}
 	lastApplied int
 
 	//volatile state on leaders
 	nextIndex  []int
 	matchIndex []int
+	logs       []Entry
 }
 
 /*
 entry log
 */
 type Entry struct {
+	Term    int
+	Command interface{}
 }
 
 /*
@@ -270,6 +277,8 @@ func (rf *Raft) switchToLeader() {
 	DPrintf("node: %v switch to Leader from %v", rf.me, rf.state)
 	rf.state = Leader
 	go rf.fireHeartBeats()
+	go rf.startReplicationEntry(rf.currentTerm)
+	go rf.startUpdateCommitIndex()
 }
 
 /**
@@ -363,13 +372,98 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // Term. the third return value is true if this server believes it is
 // the leader.
 //
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
+func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term, isLeader = rf.GetState()
+	if !isLeader {
+		return
+	}
+	entry := Entry{
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+	rf.logs = append(rf.logs, entry)
+	rf.syncCond.Broadcast()
 	return index, term, isLeader
+}
+
+func (rf *Raft) startUpdateCommitIndex() {
+	//for _ := range rf.commitC {
+	//	rf.mu.Lock()
+	//	maxCurrnetTermIndex := rf.commitIndex
+	//	for i := 0; i < len(rf.peers); i ++ {
+	//		rf.nextIndex[i]
+	//	}
+	//	rf.currentTerm ==
+	//
+	//	rf.mu.Unlock()
+	//}
+}
+
+func (rf *Raft) startReplicationEntry(term int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			go rf.replicateToServ(term, i)
+		}
+	}
+}
+
+/*
+replicate log to peer serv and wait for rf.syncCond for new entry
+*/
+func (rf *Raft) replicateToServ(term int, serv int) {
+	for {
+		for {
+			rf.mu.Lock()
+			if term != rf.currentTerm {
+				break
+			}
+			nextLogIndex := rf.nextIndex[serv]
+			if nextLogIndex >= len(rf.logs) {
+				break
+			}
+			preLogIndex := nextLogIndex - 1
+			preLogTerm := 0
+			entrys := []Entry{}
+			if preLogIndex >= 0 {
+				preLogTerm = rf.logs[len(rf.logs)-1].Term
+				entrys = append(entrys, rf.logs[preLogIndex])
+			}
+			args := AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: preLogIndex,
+				PrevLogTerm:  preLogTerm,
+				Entries:      entrys,
+				LeaderCommit: rf.commitIndex,
+			}
+			reply := AppendEntriesReply{}
+			rf.mu.Unlock() //release lock here, wait rpc return
+			ok := rf.sendAppendEntries(serv, &args, &reply)
+			if !ok {
+				continue
+			}
+			rf.mu.Lock()
+			if term != rf.currentTerm {
+				break
+			}
+			if reply.Success {
+				rf.nextIndex[serv]++
+				rf.commitC <- struct{}{}
+				//TODO consider when update matchIndex[serv]
+			} else {
+				//TODO check term
+			}
+			rf.mu.Unlock()
+		}
+		rf.mu.Lock()
+		rf.syncCond.Wait()
+		rf.mu.Unlock()
+	}
 }
 
 //
@@ -422,7 +516,7 @@ func (rf *Raft) resetElecTimer(duration time.Duration) {
 
 /**
 当收到合法RPC时，Follower需要更新心跳时间和选举超时时间
-TODO 考虑timer的使用。
+TODO 考虑timer的使用,目前的使用方式不是很优雅
 */
 func (rf *Raft) updateHeartBeat() {
 	rf.lastHeartBeat = time.Now()
@@ -472,7 +566,7 @@ func (rf *Raft) startElection(electTerm int) {
 					atomic.AddInt32(&votes, 1)
 				}
 				if reply.Term > rf.currentTerm {
-					DPrintf("electFailed:request Term %v, reply.Term: %v\n", args.Term,reply.Term)
+					DPrintf("electFailed:request Term %v, reply.Term: %v\n", args.Term, reply.Term)
 					rf.updateTerm(reply.Term)
 					rf.switchToFollower()
 					return
@@ -553,6 +647,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.syncCond = sync.NewCond(&rf.mu)
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.readPersist(persister.ReadRaftState())
@@ -560,6 +655,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.lastHeartBeat = time.Now()
 	rf.votedFor = NonVotes
+
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.commitIndex = -1
+	rf.commitC = make(chan struct{}, CommitBuffer)
 	go rf.checkElecTimeout()
 
 	// initialize from state persisted before a crash

@@ -20,6 +20,7 @@ package raft
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -100,7 +101,7 @@ type Raft struct {
 
 	//volatile state
 	commitIndex int
-	commitC chan struct{}
+	commitC     chan struct{}
 	lastApplied int
 
 	//volatile state on leaders
@@ -276,13 +277,19 @@ func (rf *Raft) switchToLeader() {
 	}
 	DPrintf("node: %v switch to Leader from %v", rf.me, rf.state)
 	rf.state = Leader
+	rf.commitIndex = -1
+	for i := 0; i < len(rf.peers); i ++ {
+		rf.nextIndex[i] = len(rf.logs)
+		rf.matchIndex[i] = -1
+	}
 	go rf.fireHeartBeats()
 	go rf.startReplicationEntry(rf.currentTerm)
-	go rf.startUpdateCommitIndex()
+	go rf.startUpdateCommitIndex(rf.currentTerm)
 }
 
 /**
-心跳检测和接受日志
+heart beat and new entry request
+
 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	start := time.Now()
@@ -389,17 +396,28 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	return index, term, isLeader
 }
 
-func (rf *Raft) startUpdateCommitIndex() {
-	//for _ := range rf.commitC {
-	//	rf.mu.Lock()
-	//	maxCurrnetTermIndex := rf.commitIndex
-	//	for i := 0; i < len(rf.peers); i ++ {
-	//		rf.nextIndex[i]
-	//	}
-	//	rf.currentTerm ==
-	//
-	//	rf.mu.Unlock()
-	//}
+/*
+try to update commitIndex when replicate log success
+ */
+func (rf *Raft) startUpdateCommitIndex(term int) {
+	for range rf.commitC {
+		rf.mu.Lock()
+		if rf.state != Leader || rf.currentTerm != term {
+			rf.mu.Unlock()
+			return
+		}
+		n := len(rf.peers)
+		matchIndexes := make([]int, n)
+		copy(matchIndexes, rf.matchIndex)
+		matchIndexes[rf.me] = len(rf.logs)
+		sort.Ints(matchIndexes)
+
+		majorityMatchIndex := matchIndexes[(n - 1 /2)]
+		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
+			rf.commitIndex = majorityMatchIndex
+		}
+		rf.mu.Unlock()
+	}
 }
 
 func (rf *Raft) startReplicationEntry(term int) {
@@ -417,51 +435,55 @@ replicate log to peer serv and wait for rf.syncCond for new entry
 */
 func (rf *Raft) replicateToServ(term int, serv int) {
 	for {
-		for {
-			rf.mu.Lock()
-			if term != rf.currentTerm {
-				break
-			}
-			nextLogIndex := rf.nextIndex[serv]
-			if nextLogIndex >= len(rf.logs) {
-				break
-			}
-			preLogIndex := nextLogIndex - 1
-			preLogTerm := 0
-			entrys := []Entry{}
-			if preLogIndex >= 0 {
-				preLogTerm = rf.logs[len(rf.logs)-1].Term
-				entrys = append(entrys, rf.logs[preLogIndex])
-			}
-			args := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: preLogIndex,
-				PrevLogTerm:  preLogTerm,
-				Entries:      entrys,
-				LeaderCommit: rf.commitIndex,
-			}
-			reply := AppendEntriesReply{}
-			rf.mu.Unlock() //release lock here, wait rpc return
-			ok := rf.sendAppendEntries(serv, &args, &reply)
-			if !ok {
-				continue
-			}
-			rf.mu.Lock()
-			if term != rf.currentTerm {
-				break
-			}
-			if reply.Success {
-				rf.nextIndex[serv]++
-				rf.commitC <- struct{}{}
-				//TODO consider when update matchIndex[serv]
-			} else {
-				//TODO check term
-			}
-			rf.mu.Unlock()
+		rf.mu.Lock()
+		if term != rf.currentTerm {
+			return
+		}
+		for rf.nextIndex[serv] >= len(rf.logs) {
+			rf.syncCond.Wait()
+		}
+		nextLogIndex := rf.nextIndex[serv]
+		preLogIndex := nextLogIndex - 1
+		preLogTerm := 0
+		entries := make([]Entry, 0)
+		if preLogIndex >= 0 {
+			preLogTerm = rf.logs[len(rf.logs)-1].Term
+			entries = append(entries, rf.logs[preLogIndex])
+		}
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: preLogIndex,
+			PrevLogTerm:  preLogTerm,
+			Entries:      entries,
+			LeaderCommit: rf.commitIndex,
+		}
+		reply := AppendEntriesReply{}
+		rf.mu.Unlock() //release lock here, wait rpc return
+		ok := rf.sendAppendEntries(serv, &args, &reply)
+		if !ok {
+			continue
 		}
 		rf.mu.Lock()
-		rf.syncCond.Wait()
+		if term != rf.currentTerm {
+			break
+		}
+		if reply.Success {
+			if nextLogIndex + 1 > rf.nextIndex[serv] {
+				rf.nextIndex[serv] = nextLogIndex + 1
+			}
+			if nextLogIndex > rf.matchIndex[serv] {
+				rf.matchIndex[serv] = nextLogIndex
+			}
+			rf.commitC <- struct{}{}
+		} else {
+			if reply.Term > rf.currentTerm {
+				rf.switchToFollower()
+				return
+			}
+			//not match, decrease nextIndex
+			rf.nextIndex[serv] --
+		}
 		rf.mu.Unlock()
 	}
 }

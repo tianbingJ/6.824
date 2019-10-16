@@ -56,7 +56,7 @@ const CommitBuffer = 1000000
 const (
 	ElectionTimeoutMin = 150 * time.Millisecond
 	ElectionTimeoutMax = 300 * time.Millisecond
-	HeartBeatInterval  = 100 * time.Millisecond
+	HeartBeatInterval  = 50 * time.Millisecond
 )
 
 const NonVotes = -1
@@ -278,7 +278,7 @@ func (rf *Raft) switchToLeader() {
 	DPrintf("node: %v switch to Leader from %v", rf.me, rf.state)
 	rf.state = Leader
 	rf.commitIndex = -1
-	for i := 0; i < len(rf.peers); i ++ {
+	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = len(rf.logs)
 		rf.matchIndex[i] = -1
 	}
@@ -289,15 +289,15 @@ func (rf *Raft) switchToLeader() {
 
 /**
 heart beat and new entry request
-
 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	start := time.Now()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	//DPrintf("node %d from term %v, receive AppendEntries...", rf.me, args.Term)
 	reply.Term = rf.currentTerm
+	reply.Success = false
 	if args.Term < rf.currentTerm {
-		reply.Success = false
 		return
 	}
 
@@ -306,9 +306,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.switchToFollower()
 	}
 
-	reply.Term = rf.currentTerm
+	rf.updateHeartBeat() //合法请求(可以认为存在leader)，重置心跳时间
+	//check log match
+	if args.PrevLogIndex >= 0 {
+		if args.PrevLogIndex >= len(rf.logs) {
+			return
+		}
+		//log not match, delete stale logs
+		if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+			rf.logs = rf.logs[0:args.PrevLogIndex]
+			return
+		}
+	}
+	rf.logs = append(rf.logs, args.Entries...)
 	reply.Success = true
-	rf.updateHeartBeat() //合法请求，重置心跳时间
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(rf.commitIndex, len(rf.logs)-1)
+	}
 	end := time.Now()
 	if end.Sub(start) > time.Millisecond*1000 {
 		DPrintf("Request cost too much")
@@ -398,7 +412,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 
 /*
 try to update commitIndex when replicate log success
- */
+*/
 func (rf *Raft) startUpdateCommitIndex(term int) {
 	for range rf.commitC {
 		rf.mu.Lock()
@@ -412,7 +426,7 @@ func (rf *Raft) startUpdateCommitIndex(term int) {
 		matchIndexes[rf.me] = len(rf.logs)
 		sort.Ints(matchIndexes)
 
-		majorityMatchIndex := matchIndexes[(n - 1 /2)]
+		majorityMatchIndex := matchIndexes[(n - 1/2)]
 		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
 			rf.commitIndex = majorityMatchIndex
 		}
@@ -434,6 +448,7 @@ func (rf *Raft) startReplicationEntry(term int) {
 replicate log to peer serv and wait for rf.syncCond for new entry
 */
 func (rf *Raft) replicateToServ(term int, serv int) {
+	DPrintf("start replication to %d of term %d", serv, term)
 	for {
 		rf.mu.Lock()
 		if term != rf.currentTerm {
@@ -469,7 +484,7 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 			break
 		}
 		if reply.Success {
-			if nextLogIndex + 1 > rf.nextIndex[serv] {
+			if nextLogIndex+1 > rf.nextIndex[serv] {
 				rf.nextIndex[serv] = nextLogIndex + 1
 			}
 			if nextLogIndex > rf.matchIndex[serv] {
@@ -614,35 +629,46 @@ leader发出心跳包
 func (rf *Raft) fireHeartBeats() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("node:%d term %v start fire heart beats", rf.me, rf.currentTerm)
 	//no leader anymore, stop fire heart beats
 	if rf.state != Leader {
 		return
 	}
 	//DPrintf("node %v fire heart Beats state:%v   term:%v", rf.me, rf.state, rf.currentTerm)
-	args := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: 0, //TODkO
-		PrevLogTerm:  rf.currentTerm,
-		Entries:      nil,
-		LeaderCommit: 0,
-	}
 	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
 		go func(serv int) {
-			if serv != rf.me {
-				reply := AppendEntriesReply{
-				}
-				rf.sendAppendEntries(serv, &args, &reply)
-				if !reply.Success {
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					if reply.Term > rf.currentTerm {
-						rf.updateTerm(reply.Term)
-						rf.switchToFollower()
-					}
-				}
+			rf.mu.Lock()
+			nextLogIndex := rf.nextIndex[serv]
+			args := AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				Entries:      make([]Entry, 0),
+				LeaderCommit: rf.commitIndex,
 			}
-
+			reply := AppendEntriesReply{
+			}
+			args.PrevLogIndex = nextLogIndex - 1
+			if args.PrevLogIndex >= 0 {
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+			}
+			rf.mu.Unlock()
+			ok := rf.sendAppendEntries(serv, &args, &reply)
+			if !ok {
+				return
+			}
+			rf.mu.Lock()
+			if !reply.Success {
+				if reply.Term > rf.currentTerm {
+					rf.switchToFollower()
+					return
+				}
+				//not match, decrease nextIndex
+				rf.nextIndex[serv] --
+			}
+			rf.mu.Unlock()
 		}(i)
 	}
 	<-time.After(HeartBeatInterval)

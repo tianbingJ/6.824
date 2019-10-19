@@ -319,11 +319,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		}
 	}
+	if (len(args.Entries)) > 0 {
+		DPrintf("node %d append entry %v to index: %d", rf.me, args.Entries, len(rf.logs))
+	}
 	rf.logs = append(rf.logs, args.Entries...)
 	reply.Success = true
 	if args.LeaderCommit > rf.commitIndex {
+		commitIndex :=  rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-		DPrintf("node %d commit index %v", rf.me, rf.commitIndex)
+		rf.sendApplyMsg(commitIndex + 1, rf.commitIndex)
+		DPrintf("Follower commit log index %d", rf.commitIndex)
 	}
 	end := time.Now()
 	if end.Sub(start) > time.Millisecond*1000 {
@@ -331,6 +336,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//DPrintf("")
 }
+
+func (rf *Raft) sendApplyMsg(start, end int) {
+	for i := start; i <= end; i++ {
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			Command:      rf.logs[i].Command,
+			CommandIndex: i,
+		}
+		rf.applyCh <- applyMsg
+		DPrintf("node %d  index %d send apply msg %v", rf.me, i, applyMsg)
+	}
+}
+
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -419,6 +437,7 @@ try to update commitIndex when replicate log success
 */
 func (rf *Raft) startUpdateCommitIndex(term int) {
 	for range rf.commitC {
+		DPrintf("get node commitIndex update msg")
 		rf.mu.Lock()
 		if rf.state != Leader || rf.currentTerm != term {
 			rf.mu.Unlock()
@@ -430,19 +449,15 @@ func (rf *Raft) startUpdateCommitIndex(term int) {
 		matchIndexes[rf.me] = len(rf.logs)
 		sort.Ints(matchIndexes)
 
-		majorityMatchIndex := matchIndexes[(n - 1)/2]
-		commitIndex := rf.commitIndex
-		DPrintf("match Index %v", matchIndexes)
+		majorityMatchIndex := matchIndexes[(n-1)/2]
+		if majorityMatchIndex < 0 {
+			continue
+		}
 		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
+			commitIndex := rf.commitIndex
 			rf.commitIndex = majorityMatchIndex
-			for i := commitIndex + 1; i <= rf.commitIndex; i++ {
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					Command:      rf.logs[i].Command,
-					CommandIndex: i,
-				}
-				DPrintf("leader commit log %d", i)
-			}
+			rf.sendApplyMsg(commitIndex + 1, rf.commitIndex)
+			DPrintf("leader commit log index %d", rf.commitIndex)
 		}
 		rf.mu.Unlock()
 	}
@@ -474,11 +489,11 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 		nextLogIndex := rf.nextIndex[serv]
 		preLogIndex := nextLogIndex - 1
 		preLogTerm := 0
-		entries := make([]Entry, 0)
 		if preLogIndex >= 0 {
 			preLogTerm = rf.logs[len(rf.logs)-1].Term
-			entries = append(entries, rf.logs[preLogIndex])
 		}
+		entries := make([]Entry, 0)
+		entries = append(entries, rf.logs[nextLogIndex])
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -498,12 +513,16 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 			break
 		}
 		if reply.Success {
-			DPrintf("leader %d replicate log %v to node %d", rf.me, nextLogIndex, serv)
-			if nextLogIndex+1 > rf.nextIndex[serv] {
-				rf.nextIndex[serv] = nextLogIndex + 1
+
+			if nextLogIndex+len(args.Entries) > rf.nextIndex[serv] {
+				rf.nextIndex[serv] = nextLogIndex + len(args.Entries)
 			}
 			if nextLogIndex > rf.matchIndex[serv] {
-				rf.matchIndex[serv] = nextLogIndex
+				rf.matchIndex[serv] = nextLogIndex - 1 + len(args.Entries)
+			}
+			if len(args.Entries) > 0 {
+				DPrintf("leader %d replicate log %v to node %d", rf.me, nextLogIndex, serv)
+				DPrintf("commit index for node %d = %v", serv, rf.matchIndex[serv])
 			}
 			rf.commitC <- struct{}{}
 		} else {

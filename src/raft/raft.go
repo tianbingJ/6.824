@@ -87,6 +87,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
+	applyCh   chan ApplyMsg
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -321,7 +322,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.logs = append(rf.logs, args.Entries...)
 	reply.Success = true
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(rf.commitIndex, len(rf.logs)-1)
+		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		DPrintf("node %d commit index %v", rf.me, rf.commitIndex)
 	}
 	end := time.Now()
 	if end.Sub(start) > time.Millisecond*1000 {
@@ -397,17 +399,19 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	term, isLeader = rf.GetState()
+	isLeader = rf.state == Leader
 	if !isLeader {
 		return
 	}
+	term = rf.currentTerm
 	entry := Entry{
-		Term:    rf.currentTerm,
+		Term:    term,
 		Command: command,
 	}
 	rf.logs = append(rf.logs, entry)
+	DPrintf("server %d append logs %v to index %v", rf.me, rf.logs, len(rf.logs)-1)
 	rf.syncCond.Broadcast()
-	return index, term, isLeader
+	return len(rf.logs) - 1, term, isLeader
 }
 
 /*
@@ -426,9 +430,19 @@ func (rf *Raft) startUpdateCommitIndex(term int) {
 		matchIndexes[rf.me] = len(rf.logs)
 		sort.Ints(matchIndexes)
 
-		majorityMatchIndex := matchIndexes[(n - 1/2)]
+		majorityMatchIndex := matchIndexes[(n - 1)/2]
+		commitIndex := rf.commitIndex
+		DPrintf("match Index %v", matchIndexes)
 		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
 			rf.commitIndex = majorityMatchIndex
+			for i := commitIndex + 1; i <= rf.commitIndex; i++ {
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					Command:      rf.logs[i].Command,
+					CommandIndex: i,
+				}
+				DPrintf("leader commit log %d", i)
+			}
 		}
 		rf.mu.Unlock()
 	}
@@ -484,6 +498,7 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 			break
 		}
 		if reply.Success {
+			DPrintf("leader %d replicate log %v to node %d", rf.me, nextLogIndex, serv)
 			if nextLogIndex+1 > rf.nextIndex[serv] {
 				rf.nextIndex[serv] = nextLogIndex + 1
 			}
@@ -696,6 +711,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.syncCond = sync.NewCond(&rf.mu)
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.readPersist(persister.ReadRaftState())

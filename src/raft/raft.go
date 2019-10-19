@@ -278,10 +278,10 @@ func (rf *Raft) switchToLeader() {
 	}
 	DPrintf("node: %v switch to Leader from %v", rf.me, rf.state)
 	rf.state = Leader
-	rf.commitIndex = -1
+	rf.commitIndex = 0
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = len(rf.logs)
-		rf.matchIndex[i] = -1
+		rf.matchIndex[i] = 0
 	}
 	go rf.fireHeartBeats()
 	go rf.startReplicationEntry(rf.currentTerm)
@@ -309,15 +309,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.updateHeartBeat() //合法请求(可以认为存在leader)，重置心跳时间
 	//check log match
-	if args.PrevLogIndex >= 0 {
-		if args.PrevLogIndex >= len(rf.logs) {
-			return
-		}
-		//log not match, delete stale logs
-		if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
-			rf.logs = rf.logs[0:args.PrevLogIndex]
-			return
-		}
+	if args.PrevLogIndex >= len(rf.logs) {
+		return
+	}
+	//log not match, delete stale logs
+	if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+		rf.logs = rf.logs[0:args.PrevLogIndex]
+		return
 	}
 	if (len(args.Entries)) > 0 {
 		DPrintf("node %d append entry %v to index: %d", rf.me, args.Entries, len(rf.logs))
@@ -325,9 +323,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.logs = append(rf.logs, args.Entries...)
 	reply.Success = true
 	if args.LeaderCommit > rf.commitIndex {
-		commitIndex :=  rf.commitIndex
+		commitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-		rf.sendApplyMsg(commitIndex + 1, rf.commitIndex)
+		rf.sendApplyMsg(commitIndex+1, rf.commitIndex)
 		DPrintf("Follower commit log index %d", rf.commitIndex)
 	}
 	end := time.Now()
@@ -348,7 +346,6 @@ func (rf *Raft) sendApplyMsg(start, end int) {
 		DPrintf("node %d  index %d send apply msg %v", rf.me, i, applyMsg)
 	}
 }
-
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -415,6 +412,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	// Your code here (2B).
+	DPrintf("Call Start Function node:%d  command:%v", rf.me, command)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	isLeader = rf.state == Leader
@@ -456,7 +454,7 @@ func (rf *Raft) startUpdateCommitIndex(term int) {
 		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
 			commitIndex := rf.commitIndex
 			rf.commitIndex = majorityMatchIndex
-			rf.sendApplyMsg(commitIndex + 1, rf.commitIndex)
+			rf.sendApplyMsg(commitIndex+1, rf.commitIndex)
 			DPrintf("leader commit log index %d", rf.commitIndex)
 		}
 		rf.mu.Unlock()
@@ -486,12 +484,10 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 		for rf.nextIndex[serv] >= len(rf.logs) {
 			rf.syncCond.Wait()
 		}
+		DPrintf("%v %v", rf.nextIndex, rf.matchIndex)
 		nextLogIndex := rf.nextIndex[serv]
 		preLogIndex := nextLogIndex - 1
-		preLogTerm := 0
-		if preLogIndex >= 0 {
-			preLogTerm = rf.logs[len(rf.logs)-1].Term
-		}
+		preLogTerm := rf.logs[preLogIndex].Term
 		entries := make([]Entry, 0)
 		entries = append(entries, rf.logs[nextLogIndex])
 		args := AppendEntriesArgs{
@@ -513,7 +509,6 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 			break
 		}
 		if reply.Success {
-
 			if nextLogIndex+len(args.Entries) > rf.nextIndex[serv] {
 				rf.nextIndex[serv] = nextLogIndex + len(args.Entries)
 			}
@@ -739,9 +734,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastHeartBeat = time.Now()
 	rf.votedFor = NonVotes
 
+	rf.logs = make([]Entry, 0) //start index is 1
+	rf.logs = append(rf.logs, Entry{Term: 0})
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
-	rf.commitIndex = -1
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex[i] = 1
+		rf.matchIndex[i] = 0
+	}
+	rf.commitIndex = 0
 	rf.commitC = make(chan struct{}, CommitBuffer)
 	go rf.checkElecTimeout()
 

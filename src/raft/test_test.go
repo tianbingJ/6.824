@@ -8,7 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"log"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -49,6 +52,7 @@ func TestInitialElection2A(t *testing.T) {
 }
 
 func TestReElection2A(t *testing.T) {
+	log.Printf("########New Test##########")
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -125,6 +129,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
+	DPrintf("####### disconnect one follower %v", (leader + 1 ) % servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// agree despite one disconnected server?
@@ -137,6 +142,7 @@ func TestFailAgree2B(t *testing.T) {
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 
+	DPrintf("####### node %v reconnect", (leader + 1 ) % servers)
 	// agree with full set of servers?
 	cfg.one(106, servers, true)
 	time.Sleep(RaftElectionTimeout)

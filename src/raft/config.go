@@ -175,8 +175,7 @@ func (cfg *config) start1(i int) {
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 						// some server has already committed a different value for this entry!
-						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
-							m.CommandIndex, i, m.Command, j, old)
+						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v", m.CommandIndex, i, m.Command, j, old)
 					}
 				}
 				_, prevok := cfg.logs[i][m.CommandIndex-1]
@@ -425,6 +424,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // to simplify the early Lab 2B tests.
 //返回值
 func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
+	DPrintf("check one %v", cmd)
 	t0 := time.Now()
 	starts := 0
 	for time.Since(t0).Seconds() < 10 {
@@ -446,7 +446,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 				}
 			}
 		}
-
+		DPrintf("[config]Start command %v to index %d", cmd, index)
 		//index是成功提交log后该log在leader日志中的index
 		if index != -1 {
 			// somebody claimed to be the leader and to have
@@ -454,7 +454,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				DPrintf("count:%v nodes commit log index:%d  cmd:%v", nd, index, cmd)
+				//DPrintf("count:%v nodes commit log index:%d  cmd:%v", nd, index, cmd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {

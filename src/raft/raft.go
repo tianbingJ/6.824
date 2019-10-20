@@ -109,6 +109,7 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 	logs       []Entry
+	killed bool
 }
 
 /*
@@ -217,7 +218,6 @@ func (reply RequestVoteReply) String() string {
 /*
  */
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	start := time.Now()
 	//// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -234,8 +234,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.updateTerm(args.Term)
 		rf.switchToFollower()
 	}
-	//TODO 需要判断log是不是最新的
-	if args.Term == rf.currentTerm && (rf.votedFor == NonVotes || rf.votedFor == args.CandidateId) {
+
+	if args.Term == rf.currentTerm && (rf.votedFor == NonVotes || rf.votedFor == args.CandidateId) && rf.candidateLogUpToDate(args.Term, args.LastLogIndex) {
 		rf.votedFor = args.CandidateId
 		granted = true
 		rf.updateHeartBeat() //重置选举时间
@@ -243,18 +243,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = granted
 	DPrintf("node:%v vote for node:%v oldTerm:%v Term:%v Granted:%v VotedFor:%v\n", rf.me, args.CandidateId, curTerm, args.Term, reply.VoteGranted, rf.votedFor)
-	end := time.Now()
-	if end.Sub(start) > time.Millisecond*1000 {
-		DPrintf("Request cost too much")
-	}
+}
+
+func (rf *Raft) candidateLogUpToDate(term int, lastLogIndex int) bool {
+	return rf.currentTerm == term && lastLogIndex >= len(rf.logs) - 1;
 }
 
 /**
 更新更高的term
 */
 func (rf *Raft) updateTerm(term int) {
-	rf.currentTerm = term
-	rf.votedFor = NonVotes
+	if term > rf.currentTerm {
+		DPrintf("[updateTerm] node %v update term to %d from %d", rf.me, term, rf.currentTerm)
+		rf.currentTerm = term
+		rf.votedFor = NonVotes
+	}
 }
 
 /**
@@ -262,10 +265,10 @@ func (rf *Raft) updateTerm(term int) {
 在个方法需要在临界区内调用。
 */
 func (rf *Raft) switchToFollower() {
+	DPrintf("node: %v switch to Follower from %v", rf.me, rf.state)
 	if rf.state == Follower {
 		return
 	}
-	DPrintf("node: %v switch to Follower from %v", rf.me, rf.state)
 	if rf.state == Leader {
 		go rf.checkElecTimeout()
 	}
@@ -273,18 +276,19 @@ func (rf *Raft) switchToFollower() {
 }
 
 func (rf *Raft) switchToLeader() {
+	DPrintf("node: %v switch to Leader from %v", rf.me, rf.state)
 	if rf.state == Leader {
 		return
 	}
-	DPrintf("node: %v switch to Leader from %v", rf.me, rf.state)
 	rf.state = Leader
 	rf.commitIndex = 0
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = len(rf.logs)
 		rf.matchIndex[i] = 0
 	}
-	go rf.fireHeartBeats()
-	go rf.startReplicationEntry(rf.currentTerm)
+	DPrintf("leader infos: logs %v  next index %v  match index %v", rf.logs, rf.nextIndex, rf.matchIndex)
+	go rf.fireHeartBeats(rf.currentTerm)
+	go rf.startReplicateEntry(rf.currentTerm)
 	go rf.startUpdateCommitIndex(rf.currentTerm)
 }
 
@@ -292,13 +296,13 @@ func (rf *Raft) switchToLeader() {
 heart beat and new entry request
 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	start := time.Now()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//DPrintf("node %d from term %v, receive AppendEntries...", rf.me, args.Term)
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if args.Term < rf.currentTerm {
+		DPrintf("[AppendEntries]term to small  args:%v, current term:%d result:%v", args, rf.currentTerm, reply)
 		return
 	}
 
@@ -308,31 +312,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.updateHeartBeat() //合法请求(可以认为存在leader)，重置心跳时间
-	//check log match
-	if args.PrevLogIndex >= len(rf.logs) {
-		return
-	}
 	//log not match, delete stale logs
-	if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
-		rf.logs = rf.logs[0:args.PrevLogIndex]
+	if args.PrevLogIndex >= len(rf.logs) || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+		DPrintf("[AppendEntries]log dismatch current node %d args:%v, logs:%d reply:%v", rf.me, args, rf.logs, reply)
+		validLogBoundery := min(args.PrevLogIndex, len(rf.logs))
+		rf.logs = rf.logs[0:validLogBoundery]
 		return
-	}
-	if (len(args.Entries)) > 0 {
-		DPrintf("node %d append entry %v to index: %d", rf.me, args.Entries, len(rf.logs))
 	}
 	rf.logs = append(rf.logs, args.Entries...)
+	if (len(args.Entries)) > 0 {
+		DPrintf("[AppendEntries]node %d append entry %v, logs: %v", rf.me, args.Entries, rf.logs)
+		DPrintf("args:%v, logs:%v", args, rf.logs)
+	}
 	reply.Success = true
 	if args.LeaderCommit > rf.commitIndex {
 		commitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
 		rf.sendApplyMsg(commitIndex+1, rf.commitIndex)
-		DPrintf("Follower commit log index %d", rf.commitIndex)
+		DPrintf("[AppendEntries]Follower %d commit log index %d", rf.me, rf.commitIndex)
 	}
-	end := time.Now()
-	if end.Sub(start) > time.Millisecond*1000 {
-		DPrintf("Request cost too much")
-	}
-	//DPrintf("")
 }
 
 func (rf *Raft) sendApplyMsg(start, end int) {
@@ -343,6 +341,9 @@ func (rf *Raft) sendApplyMsg(start, end int) {
 			CommandIndex: i,
 		}
 		rf.applyCh <- applyMsg
+		if applyMsg.CommandIndex == 2 && applyMsg.Command.(int) == 106 {
+			DPrintf("logs ......................  %d %v", rf.me, rf.logs)
+		}
 		DPrintf("node %d  index %d send apply msg %v", rf.me, i, applyMsg)
 	}
 }
@@ -412,7 +413,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	// Your code here (2B).
-	DPrintf("Call Start Function node:%d  command:%v", rf.me, command)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	isLeader = rf.state == Leader
@@ -425,7 +425,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		Command: command,
 	}
 	rf.logs = append(rf.logs, entry)
-	DPrintf("server %d append logs %v to index %v", rf.me, rf.logs, len(rf.logs)-1)
+	DPrintf("[Start]server %d append logs %v to index %v", rf.me, rf.logs, len(rf.logs)-1)
 	rf.syncCond.Broadcast()
 	return len(rf.logs) - 1, term, isLeader
 }
@@ -435,7 +435,7 @@ try to update commitIndex when replicate log success
 */
 func (rf *Raft) startUpdateCommitIndex(term int) {
 	for range rf.commitC {
-		DPrintf("get node commitIndex update msg")
+		DPrintf("[startUpdateCommitIndex]get node commitIndex update msg")
 		rf.mu.Lock()
 		if rf.state != Leader || rf.currentTerm != term {
 			rf.mu.Unlock()
@@ -448,20 +448,17 @@ func (rf *Raft) startUpdateCommitIndex(term int) {
 		sort.Ints(matchIndexes)
 
 		majorityMatchIndex := matchIndexes[(n-1)/2]
-		if majorityMatchIndex < 0 {
-			continue
-		}
 		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
 			commitIndex := rf.commitIndex
 			rf.commitIndex = majorityMatchIndex
 			rf.sendApplyMsg(commitIndex+1, rf.commitIndex)
-			DPrintf("leader commit log index %d", rf.commitIndex)
+			DPrintf("[startUpdateCommitIndex]leader commit log index %d", rf.commitIndex)
 		}
 		rf.mu.Unlock()
 	}
 }
 
-func (rf *Raft) startReplicationEntry(term int) {
+func (rf *Raft) startReplicateEntry(term int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
@@ -475,22 +472,22 @@ func (rf *Raft) startReplicationEntry(term int) {
 replicate log to peer serv and wait for rf.syncCond for new entry
 */
 func (rf *Raft) replicateToServ(term int, serv int) {
-	DPrintf("start replication to %d of term %d", serv, term)
 	for {
 		rf.mu.Lock()
-		if term != rf.currentTerm {
+		DPrintf("[replicateToServ]start replication to %d of term %d next:%v match:%v", serv, term, rf.nextIndex, rf.matchIndex)
+		if term != rf.currentTerm || rf.state != Leader || rf.killed {
+			rf.mu.Unlock()
 			return
 		}
 		for rf.nextIndex[serv] >= len(rf.logs) {
 			rf.syncCond.Wait()
 		}
-		DPrintf("%v %v", rf.nextIndex, rf.matchIndex)
 		nextLogIndex := rf.nextIndex[serv]
 		preLogIndex := nextLogIndex - 1
 		preLogTerm := rf.logs[preLogIndex].Term
 		entries := make([]Entry, 0)
 		entries = append(entries, rf.logs[nextLogIndex])
-		args := AppendEntriesArgs{
+		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: preLogIndex,
@@ -498,38 +495,55 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 			Entries:      entries,
 			LeaderCommit: rf.commitIndex,
 		}
-		reply := AppendEntriesReply{}
+		if len(args.Entries) > 0 {
+			DPrintf("[replicateToServ] node %d replicate entries to serv %d index:%d term %d", rf.me, serv, preLogIndex + 1, args.Term)
+		}
 		rf.mu.Unlock() //release lock here, wait rpc return
-		ok := rf.sendAppendEntries(serv, &args, &reply)
+		reply := &AppendEntriesReply{}
+		ok := rf.sendAppendEntries(serv, args, reply)
+		rf.mu.Lock()
 		if !ok {
+			rf.mu.Unlock()
 			continue
 		}
-		rf.mu.Lock()
-		if term != rf.currentTerm {
-			break
+		if rf.state != Leader || rf.currentTerm != term || rf.killed {
+			rf.mu.Unlock()
+			return
 		}
-		if reply.Success {
-			if nextLogIndex+len(args.Entries) > rf.nextIndex[serv] {
-				rf.nextIndex[serv] = nextLogIndex + len(args.Entries)
-			}
-			if nextLogIndex > rf.matchIndex[serv] {
-				rf.matchIndex[serv] = nextLogIndex - 1 + len(args.Entries)
-			}
-			if len(args.Entries) > 0 {
-				DPrintf("leader %d replicate log %v to node %d", rf.me, nextLogIndex, serv)
-				DPrintf("commit index for node %d = %v", serv, rf.matchIndex[serv])
-			}
-			rf.commitC <- struct{}{}
-		} else {
-			if reply.Term > rf.currentTerm {
-				rf.switchToFollower()
-				return
-			}
-			//not match, decrease nextIndex
-			rf.nextIndex[serv] --
-		}
+		rf.handleAppendEntriesFail(serv, nextLogIndex, args, reply)
 		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) handleAppendEntriesFail(serv int, nextLogIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if reply.Success {
+		if nextLogIndex + len(args.Entries) > rf.nextIndex[serv] {
+			rf.nextIndex[serv] = nextLogIndex + len(args.Entries)
+		}
+		if nextLogIndex > rf.matchIndex[serv] {
+			rf.matchIndex[serv] = nextLogIndex - 1 + len(args.Entries)
+		}
+		if len(args.Entries) > 0 {
+			DPrintf("[replicateToServ] replicate to serv %d index:%d success term %d", serv, nextLogIndex , args.Term)
+		}
+		rf.commitC <- struct{}{}
+	} else {
+		if reply.Term > rf.currentTerm {
+			DPrintf("[replicateToServ] replicate to serv %d index:%d term invalid:replyTerm:%d ", serv, nextLogIndex, reply.Term)
+			rf.updateTerm(reply.Term)
+			rf.switchToFollower()
+			return
+		}
+		//not match, decrease nextIndex
+		if rf.nextIndex[serv] > 1 {
+			//rf.nextIndex[serv] -- 这种写法可能有bug，假设心跳检测AppendEntries和尝试replicate的请求同时使用了相同的参数，两个请求都会被拒绝。实际LogIndex 应该减一
+			rf.nextIndex[serv] = nextLogIndex - 1
+			DPrintf("[replicateToServ] term %d node %v decrease next index for %v now: %d", rf.currentTerm, rf.me, serv, rf.nextIndex[serv])
+			//decrease nextIndex，replicate goroutine can move on
+			rf.syncCond.Broadcast()
+		}
+	}
+
 }
 
 //
@@ -540,6 +554,10 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.killed = true
+	close(rf.commitC)
 }
 
 /*
@@ -548,6 +566,10 @@ func (rf *Raft) Kill() {
 */
 func (rf *Raft) checkElecTimeout() {
 	rf.mu.Lock()
+	if rf.killed == true {
+		rf.mu.Unlock()
+		return
+	}
 	electTimeOut := rf.randomElecTime()
 	rf.resetElecTimer(electTimeOut)
 	ch := rf.elecTimer.C
@@ -619,8 +641,8 @@ func (rf *Raft) startElection(electTerm int) {
 			args := RequestVoteArgs{
 				Term:         electTerm,
 				CandidateId:  rf.me,
-				LastLogIndex: 0, //log对应的index TODO
-				LastLogTerm:  0, //log对应的term TODO
+				LastLogIndex: len(rf.logs) - 1,
+				LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
 			}
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(i, &args, &reply)
@@ -655,12 +677,15 @@ func (rf *Raft) startElection(electTerm int) {
 /*
 leader发出心跳包
 */
-func (rf *Raft) fireHeartBeats() {
+func (rf *Raft) fireHeartBeats(term int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.currentTerm != term {
+		return
+	}
 	DPrintf("node:%d term %v start fire heart beats", rf.me, rf.currentTerm)
 	//no leader anymore, stop fire heart beats
-	if rf.state != Leader {
+	if rf.state != Leader || rf.currentTerm != term || rf.killed {
 		return
 	}
 	//DPrintf("node %v fire heart Beats state:%v   term:%v", rf.me, rf.state, rf.currentTerm)
@@ -671,37 +696,35 @@ func (rf *Raft) fireHeartBeats() {
 		go func(serv int) {
 			rf.mu.Lock()
 			nextLogIndex := rf.nextIndex[serv]
-			args := AppendEntriesArgs{
+			args := &AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
 				Entries:      make([]Entry, 0),
 				LeaderCommit: rf.commitIndex,
 			}
-			reply := AppendEntriesReply{
+			reply := &AppendEntriesReply{
 			}
 			args.PrevLogIndex = nextLogIndex - 1
 			if args.PrevLogIndex >= 0 {
 				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 			}
+			DPrintf("leader %d send heart beats to serv %d", rf.me, serv)
 			rf.mu.Unlock()
-			ok := rf.sendAppendEntries(serv, &args, &reply)
+			ok := rf.sendAppendEntries(serv, args, reply)
 			if !ok {
 				return
 			}
 			rf.mu.Lock()
-			if !reply.Success {
-				if reply.Term > rf.currentTerm {
-					rf.switchToFollower()
-					return
-				}
-				//not match, decrease nextIndex
-				rf.nextIndex[serv] --
+			defer rf.mu.Unlock()
+			if rf.state != Leader || rf.currentTerm != term {
+				return
 			}
-			rf.mu.Unlock()
+			DPrintf("leader %d send heart beats to serv %d result %v", rf.me, serv, reply.Success)
+			rf.handleAppendEntriesFail(serv, nextLogIndex, args, reply)
 		}(i)
 	}
 	<-time.After(HeartBeatInterval)
-	go rf.fireHeartBeats()
+	go rf.fireHeartBeats(term)
 }
 
 //

@@ -526,7 +526,7 @@ func (rf *Raft) handleAppendEntriesFail(serv int, nextLogIndex int, args *Append
 		if len(args.Entries) > 0 {
 			DPrintf("[replicateToServ] replicate to serv %d index:%d success term %d", serv, nextLogIndex , args.Term)
 		}
-		rf.commitC <- struct{}{}
+		rf.commitC <- struct{}{} // send on an closed channel
 	} else {
 		if reply.Term > rf.currentTerm {
 			DPrintf("[replicateToServ] replicate to serv %d index:%d term invalid:replyTerm:%d ", serv, nextLogIndex, reply.Term)
@@ -716,7 +716,7 @@ func (rf *Raft) fireHeartBeats(term int) {
 			}
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
-			if rf.state != Leader || rf.currentTerm != term {
+			if rf.state != Leader || rf.currentTerm != term || rf.killed {
 				return
 			}
 			DPrintf("leader %d send heart beats to serv %d result %v", rf.me, serv, reply.Success)

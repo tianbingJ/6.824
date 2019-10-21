@@ -101,15 +101,16 @@ type Raft struct {
 	votedFor    int
 
 	//volatile state
-	commitIndex int
-	commitC     chan struct{}
-	lastApplied int
+	commitIndex         int
+	commitC             chan struct{}
+	lastApplied         int
+	lastSendCommitIndex int
 
 	//volatile state on leaders
 	nextIndex  []int
 	matchIndex []int
 	logs       []Entry
-	killed bool
+	killed     bool
 }
 
 /*
@@ -228,14 +229,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	curTerm := rf.currentTerm
-
 	granted := false
 	if args.Term > rf.currentTerm {
 		rf.updateTerm(args.Term)
 		rf.switchToFollower()
 	}
 
-	if args.Term == rf.currentTerm && (rf.votedFor == NonVotes || rf.votedFor == args.CandidateId) && rf.candidateLogUpToDate(args.Term, args.LastLogIndex) {
+	if args.Term == rf.currentTerm && (rf.votedFor == NonVotes || rf.votedFor == args.CandidateId) && rf.candidateLogUpToDate(args) {
 		rf.votedFor = args.CandidateId
 		granted = true
 		rf.updateHeartBeat() //重置选举时间
@@ -245,8 +245,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	DPrintf("node:%v vote for node:%v oldTerm:%v Term:%v Granted:%v VotedFor:%v\n", rf.me, args.CandidateId, curTerm, args.Term, reply.VoteGranted, rf.votedFor)
 }
 
-func (rf *Raft) candidateLogUpToDate(term int, lastLogIndex int) bool {
-	return rf.currentTerm == term && lastLogIndex >= len(rf.logs) - 1;
+func (rf *Raft) candidateLogUpToDate(args *RequestVoteArgs) bool {
+	latestTerm := rf.logs[len(rf.logs)-1 ].Term
+	return args.LastLogTerm > latestTerm || args.LastLogTerm == latestTerm && args.LastLogIndex >= len(rf.logs)-1
 }
 
 /**
@@ -302,7 +303,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if args.Term < rf.currentTerm {
-		DPrintf("[AppendEntries]term to small  args:%v, current term:%d result:%v", args, rf.currentTerm, reply)
+		DPrintf("[AppendEntries]term too small  args:%v, current term:%d result:%v", args, rf.currentTerm, reply)
 		return
 	}
 
@@ -319,31 +320,43 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.logs = rf.logs[0:validLogBoundery]
 		return
 	}
-	rf.logs = append(rf.logs, args.Entries...)
+	//不能直接写成rf.logs = append(rf.logs, args.Entries...)
+	//如果raft节点有很多过期的log，比leader要长。前缀能跟leader match，但后缀直接append会导致log不一致。
+	//只支持一个数据的复制
+	if len(args.Entries) > 0 {
+		if len(rf.logs)-1 == args.PrevLogIndex {
+			rf.logs = append(rf.logs, args.Entries...)
+		} else {
+			if args.Entries[0].Term != rf.logs[args.PrevLogIndex+1].Term {
+				rf.logs = rf.logs[0 : args.PrevLogIndex+1]
+				rf.logs = append(rf.logs, args.Entries...)
+			}
+			//否则二者一定一致
+		}
+	}
+	reply.Success = true
+	if args.LeaderCommit > rf.commitIndex {
+
+		//这里commitIndex还要去rf.commitIndex和rf.logs长度的最小值
+		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		rf.sendApplyMsg()
+		DPrintf("[AppendEntries]Follower %d commit log index %d", rf.me, rf.commitIndex)
+	}
 	if (len(args.Entries)) > 0 {
 		DPrintf("[AppendEntries]node %d append entry %v, logs: %v", rf.me, args.Entries, rf.logs)
 		DPrintf("args:%v, logs:%v", args, rf.logs)
 	}
-	reply.Success = true
-	if args.LeaderCommit > rf.commitIndex {
-		commitIndex := rf.commitIndex
-		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-		rf.sendApplyMsg(commitIndex+1, rf.commitIndex)
-		DPrintf("[AppendEntries]Follower %d commit log index %d", rf.me, rf.commitIndex)
-	}
 }
 
-func (rf *Raft) sendApplyMsg(start, end int) {
-	for i := start; i <= end; i++ {
+func (rf *Raft) sendApplyMsg() {
+	for i := rf.lastSendCommitIndex + 1; i <= rf.commitIndex && i < len(rf.logs); i++ {
 		applyMsg := ApplyMsg{
 			CommandValid: true,
 			Command:      rf.logs[i].Command,
 			CommandIndex: i,
 		}
 		rf.applyCh <- applyMsg
-		if applyMsg.CommandIndex == 2 && applyMsg.Command.(int) == 106 {
-			DPrintf("logs ......................  %d %v", rf.me, rf.logs)
-		}
+		rf.lastSendCommitIndex = i;
 		DPrintf("node %d  index %d send apply msg %v", rf.me, i, applyMsg)
 	}
 }
@@ -449,9 +462,8 @@ func (rf *Raft) startUpdateCommitIndex(term int) {
 
 		majorityMatchIndex := matchIndexes[(n-1)/2]
 		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
-			commitIndex := rf.commitIndex
 			rf.commitIndex = majorityMatchIndex
-			rf.sendApplyMsg(commitIndex+1, rf.commitIndex)
+			rf.sendApplyMsg()
 			DPrintf("[startUpdateCommitIndex]leader commit log index %d", rf.commitIndex)
 		}
 		rf.mu.Unlock()
@@ -496,7 +508,7 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 			LeaderCommit: rf.commitIndex,
 		}
 		if len(args.Entries) > 0 {
-			DPrintf("[replicateToServ] node %d replicate entries to serv %d index:%d term %d", rf.me, serv, preLogIndex + 1, args.Term)
+			DPrintf("[replicateToServ] node %d replicate entries to serv %d index:%d term %d", rf.me, serv, preLogIndex+1, args.Term)
 		}
 		rf.mu.Unlock() //release lock here, wait rpc return
 		reply := &AppendEntriesReply{}
@@ -517,14 +529,14 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 
 func (rf *Raft) handleAppendEntriesFail(serv int, nextLogIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if reply.Success {
-		if nextLogIndex + len(args.Entries) > rf.nextIndex[serv] {
+		if nextLogIndex+len(args.Entries) > rf.nextIndex[serv] {
 			rf.nextIndex[serv] = nextLogIndex + len(args.Entries)
 		}
 		if nextLogIndex > rf.matchIndex[serv] {
 			rf.matchIndex[serv] = nextLogIndex - 1 + len(args.Entries)
 		}
 		if len(args.Entries) > 0 {
-			DPrintf("[replicateToServ] replicate to serv %d index:%d success term %d", serv, nextLogIndex , args.Term)
+			DPrintf("[replicateToServ] replicate to serv %d index:%d success term %d", serv, nextLogIndex, args.Term)
 		}
 		rf.commitC <- struct{}{} // send on an closed channel
 	} else {
@@ -761,6 +773,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = append(rf.logs, Entry{Term: 0})
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
+	rf.lastSendCommitIndex = 0
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = 1
 		rf.matchIndex[i] = 0

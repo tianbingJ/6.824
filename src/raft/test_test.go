@@ -358,6 +358,7 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
+	DPrintf("###########three nodes disconnected")
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
@@ -368,11 +369,13 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
+	DPrintf("###########all nodes disconnected")
 
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
+	DPrintf("###########three nodes reconnected")
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {

@@ -242,7 +242,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = granted
-	DPrintf("node:%v vote for node:%v oldTerm:%v Term:%v Granted:%v VotedFor:%v\n", rf.me, args.CandidateId, curTerm, args.Term, reply.VoteGranted, rf.votedFor)
+	DPrintf("[RequestVotet]node:%d vote for node:%v oldTerm:%v Term:%v Granted:%v VotedFor:%v\n", rf.me, args.CandidateId, curTerm, args.Term, reply.VoteGranted, rf.votedFor)
 }
 
 func (rf *Raft) candidateLogUpToDate(args *RequestVoteArgs) bool {
@@ -277,7 +277,7 @@ func (rf *Raft) switchToFollower() {
 }
 
 func (rf *Raft) switchToLeader() {
-	DPrintf("node: %v switch to Leader from %v", rf.me, rf.state)
+	DPrintf("term %d node: %v switch to Leader from %v", rf.currentTerm, rf.me, rf.state)
 	if rf.state == Leader {
 		return
 	}
@@ -287,7 +287,7 @@ func (rf *Raft) switchToLeader() {
 		rf.nextIndex[i] = len(rf.logs)
 		rf.matchIndex[i] = 0
 	}
-	DPrintf("leader infos: logs %v  next index %v  match index %v", rf.logs, rf.nextIndex, rf.matchIndex)
+	DPrintf("[switchToLeader] term %d leader infos: logs %v  next index %v  match index %v", rf.currentTerm, rf.logs, rf.nextIndex, rf.matchIndex)
 	go rf.fireHeartBeats(rf.currentTerm)
 	go rf.startReplicateEntry(rf.currentTerm)
 	go rf.startUpdateCommitIndex(rf.currentTerm)
@@ -303,11 +303,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if args.Term < rf.currentTerm {
-		DPrintf("[AppendEntries]term too small  args:%v, current term:%d result:%v", args, rf.currentTerm, reply)
+		DPrintf("[AppendEntries]request term too small  args:%v, current term:%d result:%v", args, rf.currentTerm, reply)
 		return
 	}
 
-	if rf.state != Follower {
+	if args.Term > rf.currentTerm {
 		rf.updateTerm(args.Term)
 		rf.switchToFollower()
 	}
@@ -339,12 +339,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		//这里commitIndex还要去rf.commitIndex和rf.logs长度的最小值
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		DPrintf("[AppendEntries]before send %d", rf.me)
 		rf.sendApplyMsg()
+		DPrintf("[AppendEntries]after send %d", rf.me)
 		DPrintf("[AppendEntries]Follower %d commit log index %d", rf.me, rf.commitIndex)
 	}
 	if (len(args.Entries)) > 0 {
 		DPrintf("[AppendEntries]node %d append entry %v, logs: %v", rf.me, args.Entries, rf.logs)
-		DPrintf("args:%v, logs:%v", args, rf.logs)
 	}
 }
 
@@ -438,7 +439,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		Command: command,
 	}
 	rf.logs = append(rf.logs, entry)
-	DPrintf("[Start]server %d append logs %v to index %v", rf.me, rf.logs, len(rf.logs)-1)
+	DPrintf("[Start]leader %d append logs %v to index %v", rf.me, rf.logs, len(rf.logs)-1)
 	rf.syncCond.Broadcast()
 	return len(rf.logs) - 1, term, isLeader
 }
@@ -448,7 +449,7 @@ try to update commitIndex when replicate log success
 */
 func (rf *Raft) startUpdateCommitIndex(term int) {
 	for range rf.commitC {
-		DPrintf("[startUpdateCommitIndex]get node commitIndex update msg")
+		//DPrintf("[startUpdateCommitIndex]get node commitIndex update msg")
 		rf.mu.Lock()
 		if rf.state != Leader || rf.currentTerm != term {
 			rf.mu.Unlock()
@@ -522,12 +523,12 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 			rf.mu.Unlock()
 			return
 		}
-		rf.handleAppendEntriesFail(serv, nextLogIndex, args, reply)
+		rf.handleAppendEntriesResp(serv, nextLogIndex, args, reply)
 		rf.mu.Unlock()
 	}
 }
 
-func (rf *Raft) handleAppendEntriesFail(serv int, nextLogIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) handleAppendEntriesResp(serv int, nextLogIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if reply.Success {
 		if nextLogIndex+len(args.Entries) > rf.nextIndex[serv] {
 			rf.nextIndex[serv] = nextLogIndex + len(args.Entries)
@@ -538,7 +539,11 @@ func (rf *Raft) handleAppendEntriesFail(serv int, nextLogIndex int, args *Append
 		if len(args.Entries) > 0 {
 			DPrintf("[replicateToServ] replicate to serv %d index:%d success term %d", serv, nextLogIndex, args.Term)
 		}
-		rf.commitC <- struct{}{} // send on an closed channel
+		//must use goroutine
+		//否则这个发送的逻辑是在rf.mu的临界区内，消费者读取消息的时候又需要获取这把锁。可能造成死锁
+		go func() {
+			rf.commitC <- struct{}{} // send on an closed channel
+		}()
 	} else {
 		if reply.Term > rf.currentTerm {
 			DPrintf("[replicateToServ] replicate to serv %d index:%d term invalid:replyTerm:%d ", serv, nextLogIndex, reply.Term)
@@ -649,15 +654,17 @@ func (rf *Raft) startElection(electTerm int) {
 		if i == rf.me {
 			continue
 		}
-		go func(i int) {
+		go func(serv int) {
+			rf.mu.Lock()
 			args := RequestVoteArgs{
 				Term:         electTerm,
 				CandidateId:  rf.me,
 				LastLogIndex: len(rf.logs) - 1,
 				LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
 			}
+			rf.mu.Unlock()
 			var reply RequestVoteReply
-			ok := rf.sendRequestVote(i, &args, &reply)
+			ok := rf.sendRequestVote(serv, &args, &reply)
 			waitGroup.Done()
 			if ok {
 				rf.mu.Lock()
@@ -692,9 +699,6 @@ leader发出心跳包
 func (rf *Raft) fireHeartBeats(term int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.currentTerm != term {
-		return
-	}
 	DPrintf("node:%d term %v start fire heart beats", rf.me, rf.currentTerm)
 	//no leader anymore, stop fire heart beats
 	if rf.state != Leader || rf.currentTerm != term || rf.killed {
@@ -706,7 +710,9 @@ func (rf *Raft) fireHeartBeats(term int) {
 			continue
 		}
 		go func(serv int) {
+			DPrintf("[%d]try ... to acquire log1", serv)
 			rf.mu.Lock()
+			DPrintf("[%d]got log1", serv)
 			nextLogIndex := rf.nextIndex[serv]
 			args := &AppendEntriesArgs{
 				Term:         rf.currentTerm,
@@ -720,23 +726,30 @@ func (rf *Raft) fireHeartBeats(term int) {
 			if args.PrevLogIndex >= 0 {
 				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 			}
-			DPrintf("leader %d send heart beats to serv %d", rf.me, serv)
 			rf.mu.Unlock()
+			DPrintf("leader %d send heart beats to serv %d", rf.me, serv)
 			ok := rf.sendAppendEntries(serv, args, reply)
 			if !ok {
 				return
 			}
+			DPrintf("leader %d send heart beats to serv %d reply %v", rf.me, serv, reply.Success)
+			DPrintf("[%d]try ... to acquire log2", serv)
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
+			defer DPrintf("[%d] leave lock2", serv)
 			if rf.state != Leader || rf.currentTerm != term || rf.killed {
 				return
 			}
-			DPrintf("leader %d send heart beats to serv %d result %v", rf.me, serv, reply.Success)
-			rf.handleAppendEntriesFail(serv, nextLogIndex, args, reply)
+			//DPrintf("leader %d send heart beats to serv %d result %v", rf.me, serv, reply.Success)
+			rf.handleAppendEntriesResp(serv, nextLogIndex, args, reply)
 		}(i)
 	}
 	<-time.After(HeartBeatInterval)
 	go rf.fireHeartBeats(term)
+}
+
+func (rf *Raft) String() string {
+	return fmt.Sprintf("node:%d,\tterm %d\tstate:%v\tnext:%v \tlogs:%v", rf.me, rf.currentTerm, rf.state, rf.nextIndex, rf.logs)
 }
 
 //

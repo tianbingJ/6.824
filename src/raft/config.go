@@ -167,6 +167,7 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
+			DPrintf("[ApplyCH]read msg from applyCh %v", m)
 			err_msg := ""
 			if m.CommandValid == false {
 				// ignore other types of ApplyMsg
@@ -422,9 +423,9 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
-//返回值
+//返回值是提交的日志在log中的index
 func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
-	DPrintf("check one %v", cmd)
+	DPrintf("[one]check one %v", cmd)
 	t0 := time.Now()
 	starts := 0
 	for time.Since(t0).Seconds() < 10 {
@@ -454,7 +455,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				//DPrintf("count:%v nodes commit log index:%d  cmd:%v", nd, index, cmd)
+				//DPrintf("[config]--count:%v nodes commit log index:%d  cmd:%v", nd, index, cmd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
@@ -465,6 +466,12 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
+				for i := 0; i < expectedServers; i ++ {
+					rf := cfg.rafts[i]
+					if rf != nil {
+						DPrintf("%s", rf)
+					}
+				}
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {

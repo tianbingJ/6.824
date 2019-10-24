@@ -88,16 +88,16 @@ type RaftMu struct {
 }
 
 func (mu *RaftMu) Lock(action string) {
-	begin := time.Now()
+	//begin := time.Now()
 	mu.mu.Lock()
 	mu.t = time.Now()
 	mu.action = action
-	DPrintf("[Lock]%s get the lock, cost:%v", action, mu.t.Sub(begin))
+	//DPrintf("[Lock]%s get the lock, cost:%v", action, mu.t.Sub(begin))
 }
 
 func (mu *RaftMu) Unlock() {
-	now := time.Now()
-	DPrintf("[Locks]action release %s Lock cost %v", mu.action, now.Sub(mu.t))
+	//now := time.Now()
+	//DPrintf("[Locks]action release %s Lock cost %v", mu.action, now.Sub(mu.t))
 	mu.mu.Unlock()
 }
 
@@ -734,10 +734,7 @@ func (rf *Raft) fireHeartBeats(term int) {
 			continue
 		}
 		go func(serv int) {
-			theartBeat := time.Now()
-			DPrintf("[%d]try ... to acquire log1", serv)
 			rf.mu.Lock("fireHeartBeats 1")
-			DPrintf("[%d]got log1", serv)
 			nextLogIndex := rf.nextIndex[serv]
 			args := &AppendEntriesArgs{
 				Term:         rf.currentTerm,
@@ -760,7 +757,6 @@ func (rf *Raft) fireHeartBeats(term int) {
 			}
 			t2 := time.Now()
 			DPrintf("leader %d send heart beats to serv %d reply %v cost:%v", rf.me, serv, reply.Success, t2.Sub(t1))
-			DPrintf("[%d]try ... to acquire log2", serv)
 			rf.mu.Lock("fireHeartBeats 2")
 			defer rf.mu.Unlock()
 			defer DPrintf("[%d] leave lock2", serv)
@@ -769,8 +765,6 @@ func (rf *Raft) fireHeartBeats(term int) {
 			}
 			//DPrintf("leader %d send heart beats to serv %d result %v", rf.me, serv, reply.Success)
 			rf.handleAppendEntriesResp(serv, nextLogIndex, args, reply)
-			theartEnd := time.Now()
-			DPrintf("Leader %v to node: %v Heart Beat cost: %v", rf.me, serv, theartEnd.Sub(theartBeat))
 		}(i)
 	}
 	go func() {

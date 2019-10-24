@@ -116,6 +116,7 @@ func TestBasicAgree2B(t *testing.T) {
 	}
 
 	cfg.end()
+	DPrintf("###########################Clean up")
 }
 
 func TestFailAgree2B(t *testing.T) {

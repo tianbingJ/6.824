@@ -81,8 +81,29 @@ type ApplyMsg struct {
 //
 // A Go object implementing a single Raft peer.
 //
+type RaftMu struct {
+	mu     sync.Mutex
+	t      time.Time
+	action string
+}
+
+func (mu *RaftMu) Lock(action string) {
+	begin := time.Now()
+	mu.mu.Lock()
+	mu.t = time.Now()
+	mu.action = action
+	DPrintf("[Lock]%s get the lock, cost:%v", action, mu.t.Sub(begin))
+}
+
+func (mu *RaftMu) Unlock() {
+	now := time.Now()
+	DPrintf("[Locks]action release %s Lock cost %v", mu.action, now.Sub(mu.t))
+	mu.mu.Unlock()
+}
+
 type Raft struct {
-	mu        sync.Mutex // Lock to protect shared access to this peer's state
+	//mu        sync.Mutex // Lock to protect shared access to this peer's state
+	mu        RaftMu // Lock to protect shared access to this peer's state
 	syncCond  *sync.Cond
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
@@ -143,7 +164,7 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isLeader bool
 	// Your code here (2A).
-	rf.mu.Lock()
+	rf.mu.Lock("GetState")
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isLeader = rf.state == Leader
@@ -220,7 +241,7 @@ func (reply RequestVoteReply) String() string {
  */
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//// Your code here (2A, 2B).
-	rf.mu.Lock()
+	rf.mu.Lock("RequestVote")
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
@@ -267,9 +288,6 @@ func (rf *Raft) updateTerm(term int) {
 */
 func (rf *Raft) switchToFollower() {
 	DPrintf("node: %v switch to Follower from %v", rf.me, rf.state)
-	if rf.state == Follower {
-		return
-	}
 	if rf.state == Leader {
 		go rf.checkElecTimeout()
 	}
@@ -297,7 +315,7 @@ func (rf *Raft) switchToLeader() {
 heart beat and new entry request
 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
+	rf.mu.Lock("AppendEntries")
 	defer rf.mu.Unlock()
 	//DPrintf("node %d from term %v, receive AppendEntries...", rf.me, args.Term)
 	reply.Term = rf.currentTerm
@@ -427,7 +445,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	// Your code here (2B).
-	rf.mu.Lock()
+	rf.mu.Lock("Satrt")
 	defer rf.mu.Unlock()
 	isLeader = rf.state == Leader
 	if !isLeader {
@@ -450,29 +468,31 @@ try to update commitIndex when replicate log success
 func (rf *Raft) startUpdateCommitIndex(term int) {
 	for range rf.commitC {
 		//DPrintf("[startUpdateCommitIndex]get node commitIndex update msg")
-		rf.mu.Lock()
-		if rf.state != Leader || rf.currentTerm != term {
-			rf.mu.Unlock()
-			return
-		}
-		n := len(rf.peers)
-		matchIndexes := make([]int, n)
-		copy(matchIndexes, rf.matchIndex)
-		matchIndexes[rf.me] = len(rf.logs)
-		sort.Ints(matchIndexes)
+		go func() {
+			rf.mu.Lock("UpdateCommitIndex")
+			if rf.state != Leader || rf.currentTerm != term {
+				rf.mu.Unlock()
+				return
+			}
+			n := len(rf.peers)
+			matchIndexes := make([]int, n)
+			copy(matchIndexes, rf.matchIndex)
+			matchIndexes[rf.me] = len(rf.logs)
+			sort.Ints(matchIndexes)
 
-		majorityMatchIndex := matchIndexes[(n-1)/2]
-		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
-			rf.commitIndex = majorityMatchIndex
-			rf.sendApplyMsg()
-			DPrintf("[startUpdateCommitIndex]leader commit log index %d", rf.commitIndex)
-		}
-		rf.mu.Unlock()
+			majorityMatchIndex := matchIndexes[(n-1)/2]
+			if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
+				rf.commitIndex = majorityMatchIndex
+				rf.sendApplyMsg()
+				DPrintf("[startUpdateCommitIndex]leader commit log index %d", rf.commitIndex)
+			}
+			rf.mu.Unlock()
+		}()
 	}
 }
 
 func (rf *Raft) startReplicateEntry(term int) {
-	rf.mu.Lock()
+	rf.mu.Lock("StartReplicateEntry")
 	defer rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
@@ -486,7 +506,7 @@ replicate log to peer serv and wait for rf.syncCond for new entry
 */
 func (rf *Raft) replicateToServ(term int, serv int) {
 	for {
-		rf.mu.Lock()
+		rf.mu.Lock("replicateToServ")
 		DPrintf("[replicateToServ]start replication to %d of term %d next:%v match:%v", serv, term, rf.nextIndex, rf.matchIndex)
 		if term != rf.currentTerm || rf.state != Leader || rf.killed {
 			rf.mu.Unlock()
@@ -514,7 +534,7 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 		rf.mu.Unlock() //release lock here, wait rpc return
 		reply := &AppendEntriesReply{}
 		ok := rf.sendAppendEntries(serv, args, reply)
-		rf.mu.Lock()
+		rf.mu.Lock("replicateToServ2")
 		if !ok {
 			rf.mu.Unlock()
 			continue
@@ -535,15 +555,17 @@ func (rf *Raft) handleAppendEntriesResp(serv int, nextLogIndex int, args *Append
 		}
 		if nextLogIndex > rf.matchIndex[serv] {
 			rf.matchIndex[serv] = nextLogIndex - 1 + len(args.Entries)
+			//must use goroutine
+			//否则这个发送的逻辑是在rf.mu的临界区内，消费者读取消息的时候又需要获取这把锁。可能造成死锁
+			go func(killed bool) {
+				if !killed {
+					rf.commitC <- struct{}{} // send on an closed channel
+				}
+			}(rf.killed)
 		}
 		if len(args.Entries) > 0 {
 			DPrintf("[replicateToServ] replicate to serv %d index:%d success term %d", serv, nextLogIndex, args.Term)
 		}
-		//must use goroutine
-		//否则这个发送的逻辑是在rf.mu的临界区内，消费者读取消息的时候又需要获取这把锁。可能造成死锁
-		go func() {
-			rf.commitC <- struct{}{} // send on an closed channel
-		}()
 	} else {
 		if reply.Term > rf.currentTerm {
 			DPrintf("[replicateToServ] replicate to serv %d index:%d term invalid:replyTerm:%d ", serv, nextLogIndex, reply.Term)
@@ -571,10 +593,15 @@ func (rf *Raft) handleAppendEntriesResp(serv int, nextLogIndex int, args *Append
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	rf.mu.Lock()
+	rf.mu.Lock("Kill")
 	defer rf.mu.Unlock()
 	rf.killed = true
-	close(rf.commitC)
+	//之前没有用goroutine，导致锁没有释放，进而导致后续一系列连锁反应。
+	//这个问题找了好几天。。。
+	go func() {
+		<-time.After(time.Second * 1) //consume all msgs
+		close(rf.commitC)
+	}()
 }
 
 /*
@@ -582,7 +609,7 @@ func (rf *Raft) Kill() {
 当Follower超过一段时间没有收到心跳包时，当前Raft节点发起选举
 */
 func (rf *Raft) checkElecTimeout() {
-	rf.mu.Lock()
+	rf.mu.Lock("checkElecTimeout")
 	if rf.killed == true {
 		rf.mu.Unlock()
 		return
@@ -596,7 +623,7 @@ func (rf *Raft) checkElecTimeout() {
 	if !ok {
 		return
 	}
-	rf.mu.Lock()
+	rf.mu.Lock("checkElecTimeout2")
 	defer rf.mu.Unlock()
 	d := time.Since(rf.lastHeartBeat)
 	if rf.state == Leader {
@@ -655,7 +682,7 @@ func (rf *Raft) startElection(electTerm int) {
 			continue
 		}
 		go func(serv int) {
-			rf.mu.Lock()
+			rf.mu.Lock("startElection 1")
 			args := RequestVoteArgs{
 				Term:         electTerm,
 				CandidateId:  rf.me,
@@ -667,7 +694,7 @@ func (rf *Raft) startElection(electTerm int) {
 			ok := rf.sendRequestVote(serv, &args, &reply)
 			waitGroup.Done()
 			if ok {
-				rf.mu.Lock()
+				rf.mu.Lock("startElection 2")
 				defer rf.mu.Unlock()
 				if reply.VoteGranted {
 					atomic.AddInt32(&votes, 1)
@@ -679,9 +706,6 @@ func (rf *Raft) startElection(electTerm int) {
 					return
 				}
 				if rf.state != Candidate || rf.currentTerm != electTerm {
-					if rf.state != Leader {
-						DPrintf("elect failed: state or term changed, state:%v, term:%v, elect term:%v", rf.state, rf.currentTerm, electTerm)
-					}
 					return
 				}
 				if votes > int32(n/2) {
@@ -697,7 +721,7 @@ func (rf *Raft) startElection(electTerm int) {
 leader发出心跳包
 */
 func (rf *Raft) fireHeartBeats(term int) {
-	rf.mu.Lock()
+	rf.mu.Lock("fireHeartBeats")
 	defer rf.mu.Unlock()
 	DPrintf("node:%d term %v start fire heart beats", rf.me, rf.currentTerm)
 	//no leader anymore, stop fire heart beats
@@ -710,8 +734,9 @@ func (rf *Raft) fireHeartBeats(term int) {
 			continue
 		}
 		go func(serv int) {
+			theartBeat := time.Now()
 			DPrintf("[%d]try ... to acquire log1", serv)
-			rf.mu.Lock()
+			rf.mu.Lock("fireHeartBeats 1")
 			DPrintf("[%d]got log1", serv)
 			nextLogIndex := rf.nextIndex[serv]
 			args := &AppendEntriesArgs{
@@ -728,13 +753,15 @@ func (rf *Raft) fireHeartBeats(term int) {
 			}
 			rf.mu.Unlock()
 			DPrintf("leader %d send heart beats to serv %d", rf.me, serv)
+			t1 := time.Now()
 			ok := rf.sendAppendEntries(serv, args, reply)
 			if !ok {
 				return
 			}
-			DPrintf("leader %d send heart beats to serv %d reply %v", rf.me, serv, reply.Success)
+			t2 := time.Now()
+			DPrintf("leader %d send heart beats to serv %d reply %v cost:%v", rf.me, serv, reply.Success, t2.Sub(t1))
 			DPrintf("[%d]try ... to acquire log2", serv)
-			rf.mu.Lock()
+			rf.mu.Lock("fireHeartBeats 2")
 			defer rf.mu.Unlock()
 			defer DPrintf("[%d] leave lock2", serv)
 			if rf.state != Leader || rf.currentTerm != term || rf.killed {
@@ -742,10 +769,14 @@ func (rf *Raft) fireHeartBeats(term int) {
 			}
 			//DPrintf("leader %d send heart beats to serv %d result %v", rf.me, serv, reply.Success)
 			rf.handleAppendEntriesResp(serv, nextLogIndex, args, reply)
+			theartEnd := time.Now()
+			DPrintf("Leader %v to node: %v Heart Beat cost: %v", rf.me, serv, theartEnd.Sub(theartBeat))
 		}(i)
 	}
-	<-time.After(HeartBeatInterval)
-	go rf.fireHeartBeats(term)
+	go func() {
+		<-time.After(HeartBeatInterval)
+		go rf.fireHeartBeats(term)
+	}()
 }
 
 func (rf *Raft) String() string {
@@ -769,10 +800,13 @@ func (rf *Raft) String() string {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	rf.mu = RaftMu{
+		mu: sync.Mutex{},
+	}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.syncCond = sync.NewCond(&rf.mu)
+	rf.syncCond = sync.NewCond(&rf.mu.mu)
 	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).

@@ -128,10 +128,11 @@ type Raft struct {
 	lastSendCommitIndex int
 
 	//volatile state on leaders
-	nextIndex  []int
-	matchIndex []int
-	logs       []Entry
-	killed     bool
+	nextIndex          []int
+	matchIndex         []int
+	followerMatchIndex int //follower match with leader
+	logs               []Entry
+	killed             bool
 }
 
 /*
@@ -291,6 +292,7 @@ func (rf *Raft) switchToFollower() {
 	if rf.state == Leader {
 		go rf.checkElecTimeout()
 	}
+	rf.followerMatchIndex = 0
 	rf.state = Follower
 }
 
@@ -332,12 +334,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.updateHeartBeat() //合法请求(可以认为存在leader)，重置心跳时间
 	//log not match, delete stale logs
-	if args.PrevLogIndex >= len(rf.logs) || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+	if args.PrevLogIndex >= len(rf.logs) {
+		return
+	}
+	if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
 		DPrintf("[AppendEntries]log dismatch current node %d args:%v, logs:%d reply:%v", rf.me, args, rf.logs, reply)
 		validLogBoundery := min(args.PrevLogIndex, len(rf.logs))
 		rf.logs = rf.logs[0:validLogBoundery]
 		return
 	}
+
 	//不能直接写成rf.logs = append(rf.logs, args.Entries...)
 	//如果raft节点有很多过期的log，比leader要长。前缀能跟leader match，但后缀直接append会导致log不一致。
 	//只支持一个数据的复制
@@ -352,15 +358,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//否则二者一定一致
 		}
 	}
+	if args.PrevLogIndex + len(args.Entries) > rf.followerMatchIndex {
+		rf.followerMatchIndex = args.PrevLogIndex + len(args.Entries)
+	}
+
 	reply.Success = true
 	if args.LeaderCommit > rf.commitIndex {
 
 		//这里commitIndex还要去rf.commitIndex和rf.logs长度的最小值
-		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-		DPrintf("[AppendEntries]before send %d", rf.me)
+		rf.commitIndex = min(args.LeaderCommit, rf.followerMatchIndex)
 		rf.sendApplyMsg()
-		DPrintf("[AppendEntries]after send %d", rf.me)
-		DPrintf("[AppendEntries]Follower %d commit log index %d", rf.me, rf.commitIndex)
+		DPrintf("[AppendEntries]Follower %d commit log index %d args %v %v", rf.me, rf.commitIndex, args, rf.logs)
 	}
 	if (len(args.Entries)) > 0 {
 		DPrintf("[AppendEntries]node %d append entry %v, logs: %v", rf.me, args.Entries, rf.logs)
@@ -759,7 +767,6 @@ func (rf *Raft) fireHeartBeats(term int) {
 			DPrintf("leader %d send heart beats to serv %d reply %v cost:%v", rf.me, serv, reply.Success, t2.Sub(t1))
 			rf.mu.Lock("fireHeartBeats 2")
 			defer rf.mu.Unlock()
-			defer DPrintf("[%d] leave lock2", serv)
 			if rf.state != Leader || rf.currentTerm != term || rf.killed {
 				return
 			}

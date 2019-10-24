@@ -8,8 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "labrpc"
-import "log"
+import (
+	"labrpc"
+	"log"
+)
 import "sync"
 import "testing"
 import "runtime"
@@ -194,6 +196,7 @@ func (cfg *config) start1(i int) {
 			}
 
 			if err_msg != "" {
+				cfg.printRaft(len(cfg.logs))
 				log.Fatalf("apply error: %v\n", err_msg)
 				cfg.applyErr[i] = err_msg
 				// keep reading after error so that Raft doesn't block
@@ -466,12 +469,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				for i := 0; i < expectedServers; i ++ {
-					rf := cfg.rafts[i]
-					if rf != nil {
-						DPrintf("%s", rf)
-					}
-				}
+				cfg.printRaft(expectedServers)
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
@@ -480,6 +478,16 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 	}
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
+}
+
+func (cfg * config) printRaft(nServers int) {
+	for i := 0; i < nServers; i ++ {
+		rf := cfg.rafts[i]
+		if rf != nil {
+			DPrintf("%s", rf)
+		}
+	}
+
 }
 
 // start a Test.

@@ -812,8 +812,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.readPersist(persister.ReadRaftState())
-	rf.switchToFollower()
 	rf.state = Follower
+	rf.followerMatchIndex = 0
 	rf.lastHeartBeat = time.Now()
 	rf.votedFor = NonVotes
 

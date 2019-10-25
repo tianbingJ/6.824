@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"bytes"
 	"fmt"
+	"labgob"
 	"math/rand"
 	"sort"
 	"sync"
@@ -179,35 +181,39 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	//Your code here (2C).
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.logs = make([]Entry, 0) //start index is 1
+		rf.logs = append(rf.logs, Entry{Term: 0})
+		rf.currentTerm = 0
+		rf.votedFor = NonVotes
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var votedFor int
+	var logs []Entry;
+	if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		panic("decode error")
+	} else {
+		rf.currentTerm = term
+		rf.votedFor = votedFor
+		rf.logs = logs
+	}
 }
 
 //
@@ -262,6 +268,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		granted = true
 		rf.updateHeartBeat() //重置选举时间
 	}
+	rf.persist()
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = granted
 	DPrintf("[RequestVotet]node:%d vote for node:%v oldTerm:%v Term:%v Granted:%v VotedFor:%v\n", rf.me, args.CandidateId, curTerm, args.Term, reply.VoteGranted, rf.votedFor)
@@ -327,9 +334,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	stateChanged := false
 	if args.Term > rf.currentTerm {
 		rf.updateTerm(args.Term)
 		rf.switchToFollower()
+		stateChanged = true
 	}
 
 	rf.updateHeartBeat() //合法请求(可以认为存在leader)，重置心跳时间
@@ -357,8 +366,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			//否则二者一定一致
 		}
+		stateChanged = true
 	}
-	if args.PrevLogIndex + len(args.Entries) > rf.followerMatchIndex {
+	if args.PrevLogIndex+len(args.Entries) > rf.followerMatchIndex {
 		rf.followerMatchIndex = args.PrevLogIndex + len(args.Entries)
 	}
 
@@ -372,6 +382,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	if (len(args.Entries)) > 0 {
 		DPrintf("[AppendEntries]node %d append entry %v, logs: %v", rf.me, args.Entries, rf.logs)
+	}
+	if stateChanged {
+		rf.persist()
 	}
 }
 
@@ -579,6 +592,7 @@ func (rf *Raft) handleAppendEntriesResp(serv int, nextLogIndex int, args *Append
 			DPrintf("[replicateToServ] replicate to serv %d index:%d term invalid:replyTerm:%d ", serv, nextLogIndex, reply.Term)
 			rf.updateTerm(reply.Term)
 			rf.switchToFollower()
+			rf.persist()
 			return
 		}
 		//not match, decrease nextIndex
@@ -642,6 +656,7 @@ func (rf *Raft) checkElecTimeout() {
 		rf.currentTerm = rf.currentTerm + 1
 		rf.state = Candidate
 		rf.votedFor = rf.me
+		rf.persist()
 		//开始选举
 		go rf.startElection(rf.currentTerm)
 		DPrintf("node:%d start election, Term %v:  time:%v", rf.me, rf.currentTerm, electTimeOut)
@@ -815,10 +830,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.followerMatchIndex = 0
 	rf.lastHeartBeat = time.Now()
-	rf.votedFor = NonVotes
 
-	rf.logs = make([]Entry, 0) //start index is 1
-	rf.logs = append(rf.logs, Entry{Term: 0})
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.lastSendCommitIndex = 0

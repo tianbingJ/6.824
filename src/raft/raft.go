@@ -263,7 +263,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.switchToFollower()
 	}
 
-	if args.Term == rf.currentTerm && (rf.votedFor == NonVotes || rf.votedFor == args.CandidateId) && rf.candidateLogUpToDate(args) {
+	if (rf.votedFor == NonVotes || rf.votedFor == args.CandidateId) && rf.candidateLogUpToDate(args) {
 		rf.votedFor = args.CandidateId
 		granted = true
 		rf.updateHeartBeat() //重置选举时间
@@ -271,12 +271,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.persist()
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = granted
+	DPrintf("args:%v rf:[%v]", args, rf)
 	DPrintf("[RequestVotet]node:%d vote for node:%v oldTerm:%v Term:%v Granted:%v VotedFor:%v\n", rf.me, args.CandidateId, curTerm, args.Term, reply.VoteGranted, rf.votedFor)
 }
 
 func (rf *Raft) candidateLogUpToDate(args *RequestVoteArgs) bool {
-	latestTerm := rf.logs[len(rf.logs)-1 ].Term
-	return args.LastLogTerm > latestTerm || args.LastLogTerm == latestTerm && args.LastLogIndex >= len(rf.logs)-1
+	lastIndex := len(rf.logs)-1
+	latestTerm := rf.logs[lastIndex].Term
+	return args.LastLogTerm > latestTerm || args.LastLogTerm == latestTerm && args.LastLogIndex >= lastIndex
 }
 
 /**
@@ -378,10 +380,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//这里commitIndex还要去rf.commitIndex和rf.logs长度的最小值
 		rf.commitIndex = min(args.LeaderCommit, rf.followerMatchIndex)
 		rf.sendApplyMsg()
-		DPrintf("[AppendEntries]Follower %d commit log index %d args %v %v", rf.me, rf.commitIndex, args, rf.logs)
+		//DPrintf("[AppendEntries]Follower %d commit log index %d args %v", rf.me, rf.commitIndex, args)
 	}
 	if (len(args.Entries)) > 0 {
-		DPrintf("[AppendEntries]node %d append entry %v, logs: %v", rf.me, args.Entries, rf.logs)
+		//DPrintf("[AppendEntries]node %d append entry %v, logs: %v", rf.me, args.Entries, rf.logs)
 	}
 	if stateChanged {
 		rf.persist()
@@ -478,6 +480,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		Command: command,
 	}
 	rf.logs = append(rf.logs, entry)
+	rf.persist()
 	DPrintf("[Start]leader %d append logs %v to index %v", rf.me, rf.logs, len(rf.logs)-1)
 	rf.syncCond.Broadcast()
 	return len(rf.logs) - 1, term, isLeader
@@ -505,7 +508,7 @@ func (rf *Raft) startUpdateCommitIndex(term int) {
 			if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
 				rf.commitIndex = majorityMatchIndex
 				rf.sendApplyMsg()
-				DPrintf("[startUpdateCommitIndex]leader commit log index %d", rf.commitIndex)
+				DPrintf("[startUpdateCommitIndex]leader commit log index %d logs:%v", rf.commitIndex, rf.logs)
 			}
 			rf.mu.Unlock()
 		}()
@@ -659,7 +662,7 @@ func (rf *Raft) checkElecTimeout() {
 		rf.persist()
 		//开始选举
 		go rf.startElection(rf.currentTerm)
-		DPrintf("node:%d start election, Term %v:  time:%v", rf.me, rf.currentTerm, electTimeOut)
+		DPrintf("node:%d start election, infos:%v:  time:%v ", rf.me, rf, electTimeOut)
 	}
 	//开始新的心跳检测
 	go rf.checkElecTimeout()
@@ -726,6 +729,7 @@ func (rf *Raft) startElection(electTerm int) {
 					DPrintf("electFailed:request Term %v, reply.Term: %v\n", args.Term, reply.Term)
 					rf.updateTerm(reply.Term)
 					rf.switchToFollower()
+					rf.persist()
 					return
 				}
 				if rf.state != Candidate || rf.currentTerm != electTerm {

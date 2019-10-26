@@ -130,7 +130,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
-	DPrintf("####### disconnect one follower %v", (leader + 1 ) % servers)
+	DPrintf("####### disconnect one follower %v", (leader+1)%servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// agree despite one disconnected server?
@@ -143,7 +143,7 @@ func TestFailAgree2B(t *testing.T) {
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 
-	DPrintf("####### node %v reconnect", (leader + 1 ) % servers)
+	DPrintf("####### node %v reconnect", (leader+1)%servers)
 	// agree with full set of servers?
 	cfg.one(106, servers, true)
 	time.Sleep(RaftElectionTimeout)
@@ -316,7 +316,7 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-	DPrintf("####### leader1 %d disconnect",  leader1)
+	DPrintf("####### leader1 %d disconnect", leader1)
 
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
@@ -329,17 +329,17 @@ func TestRejoin2B(t *testing.T) {
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-	DPrintf("####### leader2 %d disconnect",  leader2)
+	DPrintf("####### leader2 %d disconnect", leader2)
 
 	// old leader connected again
 	cfg.connect(leader1)
-	DPrintf("####### leader1 %d come back",  leader1)
+	DPrintf("####### leader1 %d come back", leader1)
 
 	cfg.one(104, 2, true)
 
 	// all together now
 	cfg.connect(leader2)
-	DPrintf("####### leader2 %d come back",  leader1)
+	DPrintf("####### leader2 %d come back", leader1)
 
 	cfg.one(105, servers, true)
 	cfg.end()
@@ -632,20 +632,29 @@ func TestPersist32C(t *testing.T) {
 	cfg.one(101, 3, true)
 
 	leader := cfg.checkOneLeader()
+	DPrintf("#########1] select leader %d", leader)
 	cfg.disconnect((leader + 2) % servers)
+	DPrintf("#########] disconnected node %d", (leader+2)%servers)
 
 	cfg.one(102, 2, true)
 
 	cfg.crash1((leader + 0) % servers)
+	DPrintf("#########2] crash node %d", (leader)%servers)
 	cfg.crash1((leader + 1) % servers)
+	DPrintf("#########3] crash node %d", (leader + 1)%servers)
 	cfg.connect((leader + 2) % servers)
+	DPrintf("#########4] rejoin node %d", (leader + 2)%servers)
 	cfg.start1((leader + 0) % servers)
+	DPrintf("#########5] starts node %d", (leader)%servers)
 	cfg.connect((leader + 0) % servers)
+	DPrintf("#########6] rejoin node %d", (leader)%servers)
 
 	cfg.one(103, 2, true)
 
 	cfg.start1((leader + 1) % servers)
+	DPrintf("#########6] starts node %d", (leader + 1)%servers)
 	cfg.connect((leader + 1) % servers)
+	DPrintf("#########7] rejoin node %d", (leader + 1)%servers)
 
 	cfg.one(104, servers, true)
 
@@ -747,6 +756,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 	cfg.end()
 }
 
+//TODO fix this failed case
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true)

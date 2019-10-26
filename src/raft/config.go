@@ -196,7 +196,7 @@ func (cfg *config) start1(i int) {
 			}
 
 			if err_msg != "" {
-				cfg.printRaft(len(cfg.logs))
+				cfg.printRaft(len(cfg.rafts))
 				log.Fatalf("apply error: %v\n", err_msg)
 				cfg.applyErr[i] = err_msg
 				// keep reading after error so that Raft doesn't block
@@ -476,12 +476,13 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	cfg.printRaft(expectedServers)
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
 }
 
 func (cfg * config) printRaft(nServers int) {
-	for i := 0; i < nServers; i ++ {
+	for i := 0; i < len(cfg.rafts); i ++ {
 		rf := cfg.rafts[i]
 		if rf != nil {
 			DPrintf("%s", rf)

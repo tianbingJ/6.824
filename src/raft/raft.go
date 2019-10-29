@@ -111,6 +111,8 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	applyCh   chan ApplyMsg
+	sendCH    chan ApplyMsg
+	done      chan struct{}
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -156,9 +158,15 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 
+/*
+当ConflictingTerm > 0的时候表示有明确的log冲突，返回冲突日志的term和下标
+当ConflictingTerm < 0的时候，表示当前对没有对应PrevLogIndex的日志，返回当前下表的长度，用户leader更新nextIndex下标
+*/
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term                  int
+	Success               bool
+	ConflictingTerm       int "conflicting term"
+	StartConflictingIndex int "start index of conflicting term"
 }
 
 // return currentTerm and whether this server
@@ -276,7 +284,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) candidateLogUpToDate(args *RequestVoteArgs) bool {
-	lastIndex := len(rf.logs)-1
+	lastIndex := len(rf.logs) - 1
 	latestTerm := rf.logs[lastIndex].Term
 	return args.LastLogTerm > latestTerm || args.LastLogTerm == latestTerm && args.LastLogIndex >= lastIndex
 }
@@ -316,7 +324,7 @@ func (rf *Raft) switchToLeader() {
 		rf.nextIndex[i] = len(rf.logs)
 		rf.matchIndex[i] = 0
 	}
-	DPrintf("[switchToLeader] term %d leader infos: logs %v  next index %v  match index %v", rf.currentTerm, rf.logs, rf.nextIndex, rf.matchIndex)
+	DPrintf("[switchToLeader] term %d leader infos: loglen:%d logs %v  next index %v  match index %v", rf.currentTerm, len(rf.logs), rf.logs, rf.nextIndex, rf.matchIndex)
 	go rf.fireHeartBeats(rf.currentTerm)
 	go rf.startReplicateEntry(rf.currentTerm)
 	go rf.startUpdateCommitIndex(rf.currentTerm)
@@ -344,13 +352,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.updateHeartBeat() //合法请求(可以认为存在leader)，重置心跳时间
-	//log not match, delete stale logs
-	if args.PrevLogIndex >= len(rf.logs) {
+	lastIndex := len(rf.logs) - 1
+	//见AppendEntriesReply注释
+	if args.PrevLogIndex > lastIndex {
+		reply.ConflictingTerm = -1
+		reply.StartConflictingIndex = len(rf.logs) - 1
 		return
 	}
+	//log not match, delete stale logs
 	if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
-		DPrintf("[AppendEntries]log dismatch current node %d args:%v, logs:%d reply:%v", rf.me, args, rf.logs, reply)
 		validLogBoundery := min(args.PrevLogIndex, len(rf.logs))
+		DPrintf("[AppendEntries]log dismatch current node %d args:%v, dismatchPoint:%d commitIndex:%d logs:%v reply:%v", rf.me, args, validLogBoundery, rf.commitIndex, rf.logs, reply)
+		reply.ConflictingTerm = rf.logs[args.PrevLogIndex].Term
+		reply.StartConflictingIndex = rf.firstLogIndexWithinTerm(reply.ConflictingTerm)
 		rf.logs = rf.logs[0:validLogBoundery]
 		return
 	}
@@ -376,10 +390,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	if args.LeaderCommit > rf.commitIndex {
-
 		//这里commitIndex还要去rf.commitIndex和rf.logs长度的最小值
 		rf.commitIndex = min(args.LeaderCommit, rf.followerMatchIndex)
-		rf.sendApplyMsg()
+		//rf.syncCond.Broadcast()
+		rf.sendApplych()
 		//DPrintf("[AppendEntries]Follower %d commit log index %d args %v", rf.me, rf.commitIndex, args)
 	}
 	if (len(args.Entries)) > 0 {
@@ -390,18 +404,50 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 }
 
-func (rf *Raft) sendApplyMsg() {
+/*
+Follower send applyCh
+*/
+func (rf *Raft) sendApplych() {
 	for i := rf.lastSendCommitIndex + 1; i <= rf.commitIndex && i < len(rf.logs); i++ {
 		applyMsg := ApplyMsg{
 			CommandValid: true,
 			Command:      rf.logs[i].Command,
 			CommandIndex: i,
 		}
-		rf.applyCh <- applyMsg
+		rf.sendCH <- applyMsg
 		rf.lastSendCommitIndex = i;
 		DPrintf("node %d  index %d send apply msg %v", rf.me, i, applyMsg)
 	}
 }
+
+func (rf *Raft) doSendApplyCH() {
+	for {
+		select {
+		case msg := <-rf.sendCH:
+			rf.applyCh <- msg
+		case <-rf.done:
+			return
+		}
+	}
+}
+
+func (rf *Raft) firstLogIndexWithinTerm(term int) int {
+	firstIndex := -1
+	for i := len(rf.logs) - 1; i >= 0; i-- {
+		if rf.logs[i].Term < term {
+			break
+		}
+		if rf.logs[i].Term == term {
+			firstIndex = i
+		}
+	}
+	DPrintf("first index %v", firstIndex)
+	return firstIndex
+}
+
+//func (rf *Raft) sendApplyMsg() {
+//	}
+//}
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -492,26 +538,24 @@ try to update commitIndex when replicate log success
 func (rf *Raft) startUpdateCommitIndex(term int) {
 	for range rf.commitC {
 		//DPrintf("[startUpdateCommitIndex]get node commitIndex update msg")
-		go func() {
-			rf.mu.Lock("UpdateCommitIndex")
-			if rf.state != Leader || rf.currentTerm != term {
-				rf.mu.Unlock()
-				return
-			}
-			n := len(rf.peers)
-			matchIndexes := make([]int, n)
-			copy(matchIndexes, rf.matchIndex)
-			matchIndexes[rf.me] = len(rf.logs)
-			sort.Ints(matchIndexes)
-
-			majorityMatchIndex := matchIndexes[(n-1)/2]
-			if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
-				rf.commitIndex = majorityMatchIndex
-				rf.sendApplyMsg()
-				DPrintf("[startUpdateCommitIndex]leader commit log index %d logs:%v", rf.commitIndex, rf.logs)
-			}
+		rf.mu.Lock("UpdateCommitIndex")
+		if rf.state != Leader || rf.currentTerm != term {
 			rf.mu.Unlock()
-		}()
+			return
+		}
+		n := len(rf.peers)
+		matchIndexes := make([]int, n)
+		copy(matchIndexes, rf.matchIndex)
+		matchIndexes[rf.me] = len(rf.logs)
+		sort.Ints(matchIndexes)
+
+		majorityMatchIndex := matchIndexes[(n-1)/2]
+		if rf.currentTerm == rf.logs[majorityMatchIndex].Term && majorityMatchIndex > rf.commitIndex {
+			rf.commitIndex = majorityMatchIndex
+			rf.sendApplych()
+			DPrintf("[startUpdateCommitIndex]leader commit log index %d logs:%v", rf.commitIndex, rf.logs)
+		}
+		rf.mu.Unlock()
 	}
 }
 
@@ -557,12 +601,12 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 		}
 		rf.mu.Unlock() //release lock here, wait rpc return
 		reply := &AppendEntriesReply{}
+		//不能一直等待rpc返回，如果个别rpc超时，要尽快发起新的RPC请求
 		ok := rf.sendAppendEntries(serv, args, reply)
-		rf.mu.Lock("replicateToServ2")
 		if !ok {
-			rf.mu.Unlock()
 			continue
 		}
+		rf.mu.Lock("replicateToServ2")
 		if rf.state != Leader || rf.currentTerm != term || rf.killed {
 			rf.mu.Unlock()
 			return
@@ -599,15 +643,36 @@ func (rf *Raft) handleAppendEntriesResp(serv int, nextLogIndex int, args *Append
 			return
 		}
 		//not match, decrease nextIndex
+		//rf.nextIndex[serv] -- 这种写法可能有bug，假设心跳检测AppendEntries和尝试replicate的请求同时使用了相同的参数，两个请求都会被拒绝。实际LogIndex 应该减一
 		if rf.nextIndex[serv] > 1 {
-			//rf.nextIndex[serv] -- 这种写法可能有bug，假设心跳检测AppendEntries和尝试replicate的请求同时使用了相同的参数，两个请求都会被拒绝。实际LogIndex 应该减一
-			rf.nextIndex[serv] = nextLogIndex - 1
+			if reply.ConflictingTerm > 0 {
+				rf.nextIndex[serv] = rf.nextIndexWhenConflict(reply.ConflictingTerm, reply.StartConflictingIndex)
+			} else {
+				rf.nextIndex[serv] = reply.StartConflictingIndex
+			}
+			DPrintf("time for node %d %v", serv, time.Now())
 			DPrintf("[replicateToServ] term %d node %v decrease next index for %v now: %d", rf.currentTerm, rf.me, serv, rf.nextIndex[serv])
 			//decrease nextIndex，replicate goroutine can move on
 			rf.syncCond.Broadcast()
 		}
 	}
 
+}
+
+/*
+如果leader包含冲突term的log，则返回nextIndex指向该term的最后一个log
+如果leader不包含冲突term的log，则指向conflictIndex
+*/
+func (rf *Raft) nextIndexWhenConflict(conflictTerm, startConflictIndex int) int {
+	for i := len(rf.logs) - 1; i >= 0; i-- {
+		if rf.logs[i].Term < conflictTerm {
+			break
+		}
+		if rf.logs[i].Term == conflictTerm {
+			return i
+		}
+	}
+	return startConflictIndex
 }
 
 //
@@ -627,6 +692,7 @@ func (rf *Raft) Kill() {
 		<-time.After(time.Second * 1) //consume all msgs
 		close(rf.commitC)
 	}()
+	close(rf.done)
 }
 
 /*
@@ -800,7 +866,7 @@ func (rf *Raft) fireHeartBeats(term int) {
 }
 
 func (rf *Raft) String() string {
-	return fmt.Sprintf("node:%d,\tterm %d\tstate:%v\tnext:%v \tlogs:%v", rf.me, rf.currentTerm, rf.state, rf.nextIndex, rf.logs)
+	return fmt.Sprintf("node:%d,\tterm %d\tstate:%v\tnext:%v \tlen(logs):%d logs:%v", rf.me, rf.currentTerm, rf.state, rf.nextIndex, len(rf.logs), rf.logs)
 }
 
 //
@@ -828,6 +894,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.syncCond = sync.NewCond(&rf.mu.mu)
 	rf.applyCh = applyCh
+	rf.done = make(chan struct{})
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.readPersist(persister.ReadRaftState())
@@ -838,13 +905,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.lastSendCommitIndex = 0
-	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndex[i] = 1
-		rf.matchIndex[i] = 0
-	}
 	rf.commitIndex = 0
 	rf.commitC = make(chan struct{}, CommitBuffer)
+	rf.sendCH = make(chan ApplyMsg, 10000)
 	go rf.checkElecTimeout()
+	go rf.doSendApplyCH()
 
 	// initialize from state persisted before a crash
 	return rf

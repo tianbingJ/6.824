@@ -757,6 +757,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 }
 
 //TODO fix this failed case
+//
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true)
@@ -768,6 +769,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		DPrintf("#########iters %d", iters)
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
@@ -806,9 +808,10 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
+	DPrintf("All servers reconnected")
 
 	cfg.one(rand.Int()%10000, servers, true)
-
+	cfg.printRaft(servers)
 	cfg.end()
 }
 

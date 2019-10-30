@@ -74,20 +74,20 @@ func TestReElection2A(t *testing.T) {
 
 	// if there's no quorum, no leader should
 	// be elected.
-	DPrintf("Tests INFO ## leader disconnect again %v", leader2)
+	DPrintf("Tests INFO ## leader disconnect %v", leader2)
 	cfg.disconnect(leader2)
-	DPrintf("Tests INFO ## another node disconnect")
+	DPrintf("Tests INFO ## node %d disconnect ", (leader2+1)%servers)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
-	DPrintf("Tests INFO ## another node rejoin")
+	DPrintf("Tests INFO ## node %d rejoin", (leader2+1)%servers)
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	DPrintf("Tests INFO ## check one leader")
 	cfg.checkOneLeader()
 
-	DPrintf("Tests INFO ## leader node rejoin")
+	DPrintf("Tests INFO ## leader node %d rejoin", leader2)
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
 	DPrintf("Tests INFO ## check one leader")
@@ -641,9 +641,9 @@ func TestPersist32C(t *testing.T) {
 	cfg.crash1((leader + 0) % servers)
 	DPrintf("#########2] crash node %d", (leader)%servers)
 	cfg.crash1((leader + 1) % servers)
-	DPrintf("#########3] crash node %d", (leader + 1)%servers)
+	DPrintf("#########3] crash node %d", (leader+1)%servers)
 	cfg.connect((leader + 2) % servers)
-	DPrintf("#########4] rejoin node %d", (leader + 2)%servers)
+	DPrintf("#########4] rejoin node %d", (leader+2)%servers)
 	cfg.start1((leader + 0) % servers)
 	DPrintf("#########5] starts node %d", (leader)%servers)
 	cfg.connect((leader + 0) % servers)
@@ -652,9 +652,9 @@ func TestPersist32C(t *testing.T) {
 	cfg.one(103, 2, true)
 
 	cfg.start1((leader + 1) % servers)
-	DPrintf("#########6] starts node %d", (leader + 1)%servers)
+	DPrintf("#########6] starts node %d", (leader+1)%servers)
 	cfg.connect((leader + 1) % servers)
-	DPrintf("#########7] rejoin node %d", (leader + 1)%servers)
+	DPrintf("#########7] rejoin node %d", (leader+1)%servers)
 
 	cfg.one(104, servers, true)
 

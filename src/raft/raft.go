@@ -473,9 +473,9 @@ func (rf *Raft) startReplicateEntry(term int) {
 replicate log to peer serv and wait for rf.syncCond for new entry
 */
 func (rf *Raft) replicateToServ(term int, serv int) {
+	DPrintf("[replicateToServ]start replication to %d of term %d next:%v match:%v", serv, term, rf.nextIndex, rf.matchIndex)
 	for {
 		rf.mu.Lock("replicateToServ")
-		DPrintf("[replicateToServ]start replication to %d of term %d next:%v match:%v", serv, term, rf.nextIndex, rf.matchIndex)
 		if term != rf.currentTerm || rf.state != Leader || rf.killed {
 			rf.mu.Unlock()
 			return

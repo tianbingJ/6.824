@@ -168,6 +168,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.logs = append(rf.logs, Entry{Term: 0})
 		rf.currentTerm = 0
 		rf.votedFor = NonVotes
+		rf.persist()
 		return
 	}
 	r := bytes.NewBuffer(data)
@@ -276,7 +277,7 @@ func (rf *Raft) switchToLeader() {
 		rf.nextIndex[i] = len(rf.logs)
 		rf.matchIndex[i] = 0
 	}
-	DPrintf("[switchToLeader] term %d leader infos: loglen:%d logs %v  next index %v  match index %v", rf.currentTerm, len(rf.logs), rf.logs, rf.nextIndex, rf.matchIndex)
+	DPrintf("[switchToLeader] term %d leader infos:  next index %v  match index %v  loglen:%d logs %v", rf.currentTerm, rf.nextIndex, rf.matchIndex, len(rf.logs), rf.logs)
 	go rf.fireHeartBeats(rf.currentTerm)
 	go rf.startReplicateEntry(rf.currentTerm)
 	go rf.startUpdateCommitIndex(rf.currentTerm)
@@ -560,7 +561,7 @@ func (rf *Raft) handleAppendEntriesResp(serv int, nextLogIndex int, args *Append
 */
 func (rf *Raft) nextIndexWhenAppendFail(serv int, reply *AppendEntriesReply) int {
 	if reply.ConflictingTerm < 0 {
-		return reply.StartConflictingIndex
+		return reply.StartConflictingIndex + 1
 	}
 	for i := len(rf.logs) - 1; i >= 0; i-- {
 		if rf.logs[i].Term == reply.ConflictingTerm {
@@ -577,6 +578,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock("Kill")
 	defer rf.mu.Unlock()
+	DPrintf("Kill %d  infos:%v", rf.me, rf)
 	rf.killed = true
 	//之前没有用goroutine，导致锁没有释放，进而导致后续一系列连锁反应。
 	//这个问题找了好几天。。。
@@ -626,6 +628,9 @@ func (rf *Raft) checkElecTimeout() {
 	go rf.checkElecTimeout()
 }
 
+/**
+guarded by rf.mu
+ */
 func (rf *Raft) resetElecTimer(duration time.Duration) {
 	rf.elecTimer = time.NewTimer(duration)
 }
@@ -769,11 +774,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.state = Follower
 	rf.readPersist(persister.ReadRaftState())
-	if len(rf.logs) == 0 {
-		rf.logs = append(rf.logs, )
-		rf.votedFor = NonVotes
-		rf.persist()
-	}
 	rf.followerMatchIndex = 0
 	rf.lastHeartBeat = time.Now()
 	rf.matchIndex = make([]int, len(rf.peers))

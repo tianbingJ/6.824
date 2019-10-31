@@ -36,8 +36,8 @@ const (
 const CommitBuffer = 1000000
 
 const (
-	ElectionTimeoutMin = 500 * time.Millisecond
-	ElectionTimeoutMax = 1000 * time.Millisecond
+	ElectionTimeoutMin = 1000 * time.Millisecond
+	ElectionTimeoutMax = 2000 * time.Millisecond
 	HeartBeatInterval  = 100 * time.Millisecond
 )
 
@@ -324,15 +324,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//如果raft节点有很多过期的log，比leader要长。前缀能跟leader match，但后缀直接append会导致log不一致。
 	//只支持一个数据的复制
 	if len(args.Entries) > 0 {
-		if len(rf.logs) - 1 == args.PrevLogIndex {
-			rf.logs = append(rf.logs, args.Entries...)
-		} else {
-			if args.Entries[0].Term != rf.logs[args.PrevLogIndex+1].Term {
-				rf.logs = rf.logs[0 : args.PrevLogIndex+1]
-				rf.logs = append(rf.logs, args.Entries...)
+		i := 0
+		for ; i < len(args.Entries); i++ {
+			index := args.PrevLogIndex + 1 + i
+			if len(rf.logs) <= index {
+				break
 			}
-			//否则二者一定一致
+			if args.Entries[i].Term != rf.logs[index].Term {
+				rf.logs = rf.logs[0:index]
+				break
+			}
 		}
+		rf.logs = append(rf.logs, args.Entries[i:]...)
+		//否则二者一定一致
 		stateChanged = true
 	}
 	if args.PrevLogIndex+len(args.Entries) > rf.followerMatchIndex {
@@ -427,7 +431,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	}
 	rf.logs = append(rf.logs, entry)
 	rf.persist()
-	DPrintf("[Start]leader %d append logs:%v len:%d logs:%v", rf.me, command, len(rf.logs), rf.logs)
+	DPrintf("[Start]term %d leader %d append logs:%v len:%d logs:%v", rf.currentTerm, rf.me, command, len(rf.logs), rf.logs)
 	rf.syncCond.Broadcast()
 	return len(rf.logs) - 1, term, isLeader
 }
@@ -491,8 +495,7 @@ func (rf *Raft) replicateToServ(term int, serv int) {
 		nextLogIndex := rf.nextIndex[serv]
 		preLogIndex := nextLogIndex - 1
 		preLogTerm := rf.logs[preLogIndex].Term
-		entries := make([]Entry, 0)
-		entries = append(entries, rf.logs[nextLogIndex])
+		entries := rf.logs[nextLogIndex:]
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -561,12 +564,13 @@ func (rf *Raft) handleAppendEntriesResp(serv int, nextLogIndex int, args *Append
 }
 
 /*
+1.如果没有明确的冲突(Follower中没有足够长的log),next指向Follower log长度的下一个位置
 如果leader包含冲突term的log，则返回nextIndex指向该term的最后一个log
 如果leader不包含冲突term的log，则nextIndex指向startConflictIndex:Follower冲突term的第一个log
 */
 func (rf *Raft) nextIndexWhenAppendFail(serv int, reply *AppendEntriesReply) int {
 	if reply.ConflictingTerm < 0 {
-		return reply.StartConflictingIndex
+		return reply.StartConflictingIndex + 1 //
 	}
 	for i := len(rf.logs) - 1; i >= 0; i-- {
 		if rf.logs[i].Term == reply.ConflictingTerm {
@@ -660,20 +664,20 @@ func (rf *Raft) startElection() {
 			}
 			rf.mu.Unlock()
 			var reply RequestVoteReply
-			t := time.Now()
-			DPrintf("node %d send RequestVote to node %d", rf.me, serv)
+			//t := time.Now()
+			//DPrintf("node %d send RequestVote to node %d", rf.me, serv)
 			ok := rf.sendRequestVote(serv, &args, &reply)
 			if !ok {
 				return
 			}
-			DPrintf("node %d send RequestVote to node %d response %v request cost:%v", rf.me, serv, reply, time.Now().Sub(t))
+			//DPrintf("node %d send RequestVote to node %d response %v request cost:%v", rf.me, serv, reply, time.Now().Sub(t))
 			rf.mu.Lock("startElection 2")
 			defer rf.mu.Unlock()
 			if reply.VoteGranted {
 				atomic.AddInt32(&votes, 1)
 			}
 			if reply.Term > rf.currentTerm {
-				DPrintf("electFailed:request Term %v, reply.Term: %v\n", args.Term, reply.Term)
+				//DPrintf("electFailed:request Term %v, reply.Term: %v\n", args.Term, reply.Term)
 				rf.updateTerm(reply.Term)
 				rf.switchToFollower()
 				rf.persist()

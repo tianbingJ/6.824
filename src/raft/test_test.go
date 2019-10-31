@@ -48,7 +48,7 @@ func TestInitialElection2A(t *testing.T) {
 	cfg.checkOneLeader()
 
 	cfg.end()
-	fmt.Println("Test1 done")
+	DPrintf("Test1 done")
 }
 
 func TestReElection2A(t *testing.T) {

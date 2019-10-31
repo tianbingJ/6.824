@@ -379,6 +379,7 @@ func TestBackup2B(t *testing.T) {
 	DPrintf("###########three nodes reconnected")
 
 	// lots of successful commands to new group.
+	//成功复制50条log
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
@@ -411,6 +412,7 @@ func TestBackup2B(t *testing.T) {
 		cfg.one(rand.Int(), 3, true)
 	}
 
+	DPrintf("###########all nodes reconnected")
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)

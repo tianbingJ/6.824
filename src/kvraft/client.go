@@ -1,11 +1,13 @@
 package raftkv
 
-import "labrpc"
+import (
+	"labrpc"
+)
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
+	leader  int //缓存leader
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 }
@@ -37,7 +39,18 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
+	args := &GetArgs{
+		Key:       key,
+		requestId: nrand(),
+	}
+	reply := &GetReply{}
+	n := len(ck.servers)
+	for i := 0; i < n; i++ {
+		ok := ck.servers[(i + ck.leader) % n].Call("KVServer.Get", args, reply)
+		if !ok || reply.WrongLeader {
+			continue
+		}
+	}
 	// You will have to modify this function.
 	return ""
 }
@@ -54,6 +67,21 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := &PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		requestId: nrand(),
+	}
+	reply := &PutAppendReply{
+	}
+	n := len(ck.servers)
+	for i := 0; i < n; i++ {
+		ok := ck.servers[(i + ck.leader) % n].Call("KVServer.Get", args, reply)
+		if !ok || reply.WrongLeader {
+			continue
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

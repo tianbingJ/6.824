@@ -17,11 +17,11 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
 }
 
 type KVServer struct {
@@ -30,13 +30,18 @@ type KVServer struct {
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 
-	maxraftstate int // snapshot if log grows this big
-
 	// Your definitions here.
+	kvMap map[string]string
+
+	maxraftstate int // snapshot if log grows this big
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
 	// Your code here.
 }
 
@@ -82,6 +87,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.kvMap = make(map[string]string)
 
 	// You may need initialization code here.
 
